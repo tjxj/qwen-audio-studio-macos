@@ -1,10 +1,16 @@
 import SwiftUI
 import StudioCore
+import AppKit
 
 struct CreationScreen: View {
-    private let name = "雨夜里的慢生活"
-    private let mode: CreationMode = .podcast
-    private let script = "【场景】雨夜，窗边的一盏灯。\n\n【角色：讲述者】温和沉静，自然舒缓。\n\n【音效】细雨落在窗沿，轻柔、不盖过人声。\n\n【对白：讲述者】今晚，不必急着给生活一个答案。把未完成的事留给明天，先照顾好此刻的自己。\n\n【音乐】极轻的钢琴，在尾音后慢慢淡出。"
+    let draft: DraftController
+    @Environment(StudioPreferences.self) private var preferences
+    @State private var editor = PromptEditorHandle()
+    @FocusState private var titleFocused: Bool
+
+    private func field<Value>(_ key: WritableKeyPath<DraftFields, Value>) -> Binding<Value> {
+        Binding(get: { draft.fields[keyPath: key] }, set: { value in draft.change { $0[keyPath: key] = value } })
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -17,53 +23,68 @@ struct CreationScreen: View {
         .padding(.bottom, 20)
         .background(StudioPalette.background)
         .navigationTitle("创作台")
+        .task { try? await draft.saveNow() }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
-                Label("界面预览", systemImage: "eye")
-                    .font(.system(size: 12))
-                    .foregroundStyle(.secondary)
+                Button { Task { try? await draft.saveNow() } } label: {
+                    Label("保存草稿", systemImage: "square.and.arrow.down")
+                }
+                .disabled(draft.state == .conflict)
+                .help("暂存当前会话的草稿（⌘S）")
             }
         }
     }
 
     private var header: some View {
-        HStack(alignment: .center, spacing: 12) {
-            Text(name)
-                .font(StudioTypography.serif(30))
-                .accessibilityLabel("作品名称，界面样例")
-                .frame(maxWidth: 460, alignment: .leading)
-
-            Label("界面样例", systemImage: "eye")
+        HStack(spacing: 12) {
+            TextField("作品名称", text: field(\.name))
+                .textFieldStyle(.plain)
+                .font(StudioTypography.serif(28))
+                .focused($titleFocused)
+                .onSubmit { editor.focus() }
+                .accessibilityIdentifier("draft-name")
+                .frame(maxWidth: .infinity, alignment: .leading)
+            Label(saveTitle, systemImage: saveSymbol)
                 .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(StudioPalette.green)
-                .padding(.horizontal, 9)
-                .padding(.vertical, 5)
-                .background(StudioPalette.greenSoft, in: Capsule())
-
-            Spacer()
-
-            Image(systemName: "ellipsis")
-                .font(.system(size: 16, weight: .semibold))
-                .foregroundStyle(.secondary)
-                .frame(width: 28, height: 28)
-            .help("草稿功能将在后续版本接入")
+                .foregroundStyle(draft.state == .conflict ? Color.orange : .secondary)
+                .fixedSize()
         }
         .frame(height: 42)
     }
 
+    private var saveTitle: String {
+        switch draft.state {
+        case .unsaved: "有未保存更改"
+        case .saving: "正在暂存…"
+        case .saved: "已暂存 · 本次会话"
+        case .conflict: "版本冲突 · 本地稿已保留"
+        case .failed: "暂存失败 · 可重试"
+        }
+    }
+    private var saveSymbol: String {
+        switch draft.state {
+        case .saved: "checkmark.circle"
+        case .conflict, .failed: "exclamationmark.triangle"
+        case .saving: "arrow.triangle.2.circlepath"
+        case .unsaved: "circle.dotted"
+        }
+    }
+
     private var modes: some View {
-        HStack(spacing: 8) {
-            ForEach(CreationMode.allCases) { item in
-                Label(item.title, systemImage: item.symbol)
-                    .font(.system(size: 12, weight: .semibold))
-                    .frame(maxWidth: .infinity)
-                    .frame(height: 38)
-                    .foregroundStyle(mode == item ? Color.white : Color.primary)
-                    .background(mode == item ? StudioPalette.green : StudioPalette.surface,
-                                in: RoundedRectangle(cornerRadius: 9))
-                    .overlay(RoundedRectangle(cornerRadius: 9)
-                        .stroke(mode == item ? StudioPalette.green : StudioPalette.stroke))
-                .accessibilityAddTraits(mode == item ? [.isSelected] : [])
+        HStack(spacing: 7) {
+            ForEach(CreationMode.allCases) { mode in
+                Button { draft.change { $0.mode = mode } } label: {
+                    Label(mode.title, systemImage: mode.symbol)
+                        .font(.system(size: 12, weight: .semibold))
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 38)
+                        .foregroundStyle(draft.fields.mode == mode ? .white : .primary)
+                        .background(draft.fields.mode == mode ? StudioPalette.green : StudioPalette.surface,
+                                    in: RoundedRectangle(cornerRadius: 9))
+                        .overlay(RoundedRectangle(cornerRadius: 9).stroke(StudioPalette.stroke))
+                }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(draft.fields.mode == mode ? [.isSelected] : [])
             }
         }
     }
@@ -72,186 +93,89 @@ struct CreationScreen: View {
         VStack(spacing: 0) {
             HStack(spacing: 0) {
                 scriptPane
-                Rectangle()
-                    .fill(StudioPalette.stroke)
-                    .frame(width: 1)
-                inspector
-                    .frame(width: 294)
+                Divider()
+                ParameterInspector(params: field(\.params)).frame(width: 258)
             }
             .frame(maxHeight: .infinity)
-
+            if draft.state == .conflict {
+                HStack {
+                    Text("本地文本仍可编辑。可复制恢复稿，或另存为新草稿。")
+                    Spacer()
+                    Button("复制恢复稿") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(draft.localRecoveryText ?? draft.fields.prompt, forType: .string)
+                    }
+                    Button("另存新草稿") { Task { try? await draft.saveRecoveryAsNewDraft() } }
+                }
+                .font(.caption).padding(10)
+            }
             Divider()
             footer
         }
-        .background(StudioPalette.surface,
-                    in: RoundedRectangle(cornerRadius: 14))
+        .background(StudioPalette.surface, in: RoundedRectangle(cornerRadius: 14))
         .overlay(RoundedRectangle(cornerRadius: 14).stroke(StudioPalette.stroke))
         .clipShape(RoundedRectangle(cornerRadius: 14))
         .frame(maxHeight: .infinity)
     }
 
     private var scriptPane: some View {
-        VStack(alignment: .leading, spacing: 13) {
-            HStack(alignment: .center) {
-                Text("创作脚本")
-                    .font(StudioTypography.serif(20))
-                Spacer()
-                HStack(spacing: 5) {
-                    insertionButton("角色", symbol: "person")
-                    insertionButton("对白", symbol: "text.bubble")
-                    insertionButton("时间戳", symbol: "clock")
-                    insertionButton("音效", symbol: "sparkles")
-                    insertionButton("音乐", symbol: "music.note")
-                }
-            }
-
-            ScrollView {
-                Text(script)
-                    .font(StudioTypography.serif(17))
-                    .lineSpacing(8)
-                    .frame(maxWidth: .infinity, alignment: .topLeading)
-                    .padding(16)
-            }
-                .background(StudioPalette.background,
-                            in: RoundedRectangle(cornerRadius: 9))
-                .overlay(RoundedRectangle(cornerRadius: 9).stroke(StudioPalette.stroke))
-                .accessibilityLabel("创作脚本只读预览")
-
+        VStack(alignment: .leading, spacing: 11) {
             HStack {
-                Text("脚本只读预览 · 编辑与自动保存后续接入")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.secondary)
+                Text("创作脚本").font(StudioTypography.serif(20))
                 Spacer()
-                Text("\(script.unicodeScalars.count) / 3000 字")
-                    .font(.system(size: 11, design: .monospaced))
-                    .foregroundStyle(.secondary)
+                Text("⌘Z 撤销").font(.caption).foregroundStyle(.secondary)
             }
-        }
-        .padding(20)
-        .frame(maxWidth: .infinity)
-    }
-
-    private func insertionButton(_ title: String, symbol: String) -> some View {
-        Button {} label: {
-            Label(title, systemImage: symbol)
-                .font(.system(size: 11))
-        }
-        .buttonStyle(.bordered)
-        .disabled(true)
-        .help("结构化插入将在后续版本接入")
-    }
-
-    private var inspector: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("声音与输出")
-                .font(StudioTypography.serif(18))
-            voiceInspector
-
-            Spacer(minLength: 0)
+            HStack(spacing: 5) {
+                insertButton("角色", tag: "【角色：讲述者】")
+                insertButton("对白", tag: "【对白：讲述者】")
+                insertButton("时间戳", tag: "【00:00】")
+                insertButton("音效", tag: "【音效】")
+                insertButton("音乐", tag: "【音乐】")
+                Spacer(minLength: 0)
+            }
+            PromptEditor(text: field(\.prompt), font: preferences.scriptFont.font(size: preferences.scriptSize), handle: editor)
+                .background(StudioPalette.background, in: RoundedRectangle(cornerRadius: 9))
+                .overlay(RoundedRectangle(cornerRadius: 9).stroke(StudioPalette.stroke))
+                .clipShape(RoundedRectangle(cornerRadius: 9))
+                .frame(minHeight: 100, maxHeight: .infinity)
+            HStack {
+                Text("编辑后切换模式，保留你的脚本")
+                Spacer()
+                Text("\(draft.fields.prompt.unicodeScalars.count) 字").monospacedDigit()
+            }
+            .font(.system(size: 11)).foregroundStyle(.secondary)
         }
         .padding(18)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private var voiceInspector: some View {
-        VStack(alignment: .leading, spacing: 15) {
-            Text("描述你想要的声音")
-                .font(.system(size: 13, weight: .semibold))
-
-            Text("温和沉静的叙述者，语速舒缓，像在窗边与朋友交谈。")
-                .font(.system(size: 13))
-                .foregroundStyle(.secondary)
-                .padding(11)
-                .frame(maxWidth: .infinity, alignment: .topLeading)
-                .frame(height: 100)
-                .background(StudioPalette.background,
-                            in: RoundedRectangle(cornerRadius: 8))
-                .overlay(RoundedRectangle(cornerRadius: 8).stroke(StudioPalette.stroke))
-                .accessibilityLabel("声音描述只读预览")
-
-            Button {} label: {
-                Label("添加参考音色", systemImage: "plus")
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.bordered)
-            .disabled(true)
-
-            Text("参考音频会在每次确认生成后上传")
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            Divider()
-
-            Text("常用输出设置")
-                .font(.system(size: 13, weight: .semibold))
-
-            HStack(alignment: .top, spacing: 10) {
-                VStack(alignment: .leading, spacing: 5) {
-                    Text("输出格式")
-                    Text("WAV")
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(7)
-                        .background(StudioPalette.background,
-                                    in: RoundedRectangle(cornerRadius: 6))
-                }
-                VStack(alignment: .leading, spacing: 5) {
-                    Text("采样率")
-                    Text("48 kHz")
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(7)
-                        .background(StudioPalette.background,
-                                    in: RoundedRectangle(cornerRadius: 6))
-                }
-            }
+    private func insertButton(_ title: String, tag: String) -> some View {
+        Button(title) { editor.insert(tag) }
             .font(.system(size: 11))
-
-            Button("高级设置…") {}
-                .buttonStyle(.bordered)
-                .disabled(true)
-
-            Text("Seed 42 · 立体声 · 1.0×")
-                .font(.system(size: 11))
-                .foregroundStyle(.secondary)
-        }
+            .buttonStyle(.bordered)
+            .help("在光标或选区插入\(title)标签，可撤销")
     }
 
     private var footer: some View {
         HStack(spacing: 12) {
-            Label("尚未选择输出目录", systemImage: "folder")
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-            Button("更改…") {}
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
-                .disabled(true)
-
-            Spacer()
-
-            Text("生成候选")
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-            HStack(spacing: 0) {
-                ForEach(1...3, id: \.self) { number in
-                    Text("\(number)")
-                        .font(.system(size: 12, weight: number == 1 ? .semibold : .regular))
-                        .frame(width: 34, height: 27)
-                        .background(number == 1 ? StudioPalette.greenSoft : .clear)
-                        .foregroundStyle(number == 1 ? StudioPalette.green : .secondary)
-                }
+            VStack(alignment: .leading, spacing: 4) {
+                Label("尚未选择输出目录", systemImage: "folder")
+                Text("草稿暂存在内存，关闭应用后不保留。")
+                    .font(.system(size: 10))
             }
-            .clipShape(RoundedRectangle(cornerRadius: 7))
-            .overlay(RoundedRectangle(cornerRadius: 7).stroke(StudioPalette.stroke))
-
+            .font(.system(size: 12)).foregroundStyle(.secondary)
+            Spacer()
+            Text("候选 1").font(.system(size: 12)).foregroundStyle(.secondary)
             Button {} label: {
                 Label("生成音频", systemImage: "waveform")
                     .font(.system(size: 13, weight: .semibold))
-                    .frame(width: 134, height: 31)
+                    .frame(width: 126, height: 31)
             }
             .buttonStyle(.borderedProminent)
             .disabled(true)
             .help("生成服务将在后续版本接入")
         }
-        .padding(.horizontal, 20)
+        .padding(.horizontal, 18)
         .frame(height: 63)
     }
 }

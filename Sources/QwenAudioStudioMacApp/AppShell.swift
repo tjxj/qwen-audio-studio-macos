@@ -1,4 +1,5 @@
 import SwiftUI
+import StudioCore
 
 enum StudioPalette {
     static let green = Color(red: 0.10, green: 0.38, blue: 0.33)
@@ -31,9 +32,17 @@ private enum StudioPage: String, CaseIterable, Identifiable {
 }
 
 struct AppShell: View {
+    @State private var draft: DraftController
     @State private var selection: StudioPage? = ProcessInfo.processInfo.arguments.contains("--capture-page=templates") ? .templates : .creation
     @Environment(\.openSettings) private var openSettings
     @Environment(\.colorScheme) private var colorScheme
+
+    init() {
+        let longScript = ProcessInfo.processInfo.arguments.contains("--capture-long-script")
+        let fields: DraftFields? = longScript ? DraftFields(name: "长脚本布局验证", prompt:
+            Array(repeating: DraftController.sample(for: .podcast), count: 20).joined(separator: "\n\n")) : nil
+        _draft = State(initialValue: DraftController(fields: fields, store: InMemoryDraftStore()))
+    }
 
     var body: some View {
         NavigationSplitView {
@@ -93,7 +102,7 @@ struct AppShell: View {
         } detail: {
             Group {
                 switch selection ?? .creation {
-                case .creation: CreationScreen()
+                case .creation: CreationScreen(draft: draft)
                 case .library: LibraryScreen()
                 case .templates: TemplateScreen()
                 }
@@ -102,6 +111,7 @@ struct AppShell: View {
         }
         .navigationSplitViewStyle(.balanced)
         .tint(StudioPalette.green)
+        .focusedSceneValue(\.draftController, draft)
     }
 
     private var brand: some View {

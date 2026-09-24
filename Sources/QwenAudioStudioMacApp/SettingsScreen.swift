@@ -1,10 +1,12 @@
 import SwiftUI
 
 struct SettingsScreen: View {
+    @Environment(StudioPreferences.self) private var preferences
     @State private var apiKey = ""
     @State private var workspaceID = ""
 
     var body: some View {
+        @Bindable var preferences = preferences
         Form {
             Section("百炼连接") {
                 SecureField("API Key", text: $apiKey)
@@ -22,10 +24,15 @@ struct SettingsScreen: View {
             }
 
             Section("外观") {
-                LabeledContent("主题", value: "跟随系统")
-                Text("支持系统深色外观；手动主题设置将在后续阶段接入。")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                Picker("主题", selection: $preferences.appearance) {
+                    ForEach(StudioAppearance.allCases) { Text($0.title).tag($0) }
+                }
+                Picker("脚本字体", selection: $preferences.scriptFont) {
+                    ForEach(ScriptFont.allCases) { Text($0.title).tag($0) }
+                }
+                Slider(value: $preferences.scriptSize, in: 14...26, step: 1) {
+                    Text("脚本字号 \(Int(preferences.scriptSize))")
+                }
             }
         }
         .formStyle(.grouped)
