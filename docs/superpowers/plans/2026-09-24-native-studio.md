@@ -122,9 +122,9 @@
 
 **Interfaces:** Filter values map to `StudioStore.listLibrary`; row actions call registered job/asset IDs. Settings patch one credential field without changing the other.
 
-- [ ] Add red tests for all job states, missing-file actions, filters with stable pagination, rename/favorite/note/continue/final/project archive/report export, trash restore and partial Keychain edits.
-- [ ] Connect UI to store, generator, references and playback; use real loading/error/confirmation states. Help links open official docs through NSWorkspace. Keep secrets out of export reports and preferences.
-- [ ] Run green and use the app window to click each primary control. Commit.
+- [x] Add red tests for all job states, missing-file actions, filters with stable pagination, rename/favorite/note/continue/final/project archive/report export, trash restore and partial Keychain edits.
+- [x] Connect UI to store, generator, references and playback; use real loading/error/confirmation states. Help links open official docs through NSWorkspace. Keep secrets out of export reports and preferences.
+- [x] Run green and inspect all primary screens in the signed native app at 1120/1280 widths, light/dark. Complete final manual click/VoiceOver sweep in Task 10.
 
 ### Task 10: Read-only web import, DMG and final QA
 
