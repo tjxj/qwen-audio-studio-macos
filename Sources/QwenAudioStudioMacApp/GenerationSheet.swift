@@ -1,5 +1,57 @@
 import SwiftUI
 import StudioCore
+import Observation
+
+@MainActor @Observable
+final class GenerationConfirmationController {
+    private var task: Task<Void, Never>?
+    private var generation = 0
+    private var active = true
+    private(set) var isConfirming = false
+    private(set) var errorMessage: String?
+
+    @discardableResult func begin(
+        confirm: @escaping @Sendable () async throws -> GenerationAuthorization,
+        revoke: @escaping @Sendable (GenerationAuthorization) async -> Void,
+        onConfirmed: @escaping @MainActor (GenerationAuthorization) -> Void
+    ) -> Task<Void, Never> {
+        guard active else { return Task {} }
+        generation += 1
+        let started = generation
+        task?.cancel()
+        isConfirming = true
+        errorMessage = nil
+        let work = Task { @MainActor in
+            do {
+                let authorization = try await confirm()
+                guard active, started == generation, !Task.isCancelled else {
+                    await revoke(authorization)
+                    return
+                }
+                isConfirming = false
+                task = nil
+                onConfirmed(authorization)
+            } catch {
+                guard active, started == generation, !Task.isCancelled else { return }
+                isConfirming = false
+                task = nil
+                errorMessage = "确认内容已变化，请重新预检。"
+            }
+        }
+        task = work
+        return work
+    }
+
+    func cancel() {
+        active = false
+        generation += 1
+        task?.cancel()
+        task = nil
+        isConfirming = false
+    }
+
+    func disappear() { cancel() }
+}
 
 /// Presented by the durable AppState wiring in Task 9. The current disabled
 /// CreationScreen button must stay disabled until that state exists.
@@ -10,7 +62,7 @@ struct GenerationSheet: View {
     let onConfirm: (String, String) -> Void
     let onCancel: () -> Void
     @State private var chargeAcknowledged = false
-    @State private var confirmationError: String?
+    @State private var confirmation = GenerationConfirmationController()
 
     var body: some View {
         VStack(alignment: .leading, spacing: 15) {
@@ -34,23 +86,26 @@ struct GenerationSheet: View {
             .padding(10)
             .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 8))
             Toggle("我已核对以上内容，了解每个候选可能产生费用", isOn: $chargeAcknowledged)
-            if let confirmationError { Text(confirmationError).foregroundStyle(.red).font(.caption) }
+            if let error = confirmation.errorMessage { Text(error).foregroundStyle(.red).font(.caption) }
             HStack {
                 Spacer()
-                Button("取消", action: onCancel)
+                Button("取消") {
+                    confirmation.cancel()
+                    onCancel()
+                }
                 Button("确认并生成") {
-                    Task {
-                        do {
-                            let authorization = try await service.confirm(plan)
+                    confirmation.begin(confirm: { try await service.confirm(plan) },
+                        revoke: { await service.revokeAuthorization($0) },
+                        onConfirmed: { authorization in
                             onConfirm(authorization.confirmationHash, authorization.clientRequestID)
-                        } catch { confirmationError = "确认内容已变化，请重新预检。" }
-                    }
+                        })
                 }
                     .buttonStyle(.borderedProminent)
-                    .disabled(!chargeAcknowledged)
+                    .disabled(!chargeAcknowledged || confirmation.isConfirming)
             }
         }
         .padding(22)
         .frame(width: 620)
+        .onDisappear { confirmation.disappear() }
     }
 }

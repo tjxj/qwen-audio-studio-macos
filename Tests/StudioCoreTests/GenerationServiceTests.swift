@@ -59,6 +59,20 @@ struct GenerationServiceTests {
         try await store.close()
     }
 
+    @Test func revokedUnconsumedConfirmationCannotSubmit() async throws {
+        let (root, store, dirs, _, fake, service) = try fixture(); defer { try? FileManager.default.removeItem(at: root) }
+        let request = try await input(root, store, dirs)
+        let plan = try await service.preflight(request)
+        let authorization = try await service.confirm(plan)
+        await service.revokeAuthorization(authorization)
+        await #expect(throws: GenerationError.confirmationMismatch) {
+            try await service.submit(plan, confirmedHash: authorization.confirmationHash, clientRequestID: request.clientRequestID)
+        }
+        #expect(await fake.calls().isEmpty)
+        #expect(try await store.listLibrary().isEmpty)
+        try await store.close()
+    }
+
     @Test func uploadConsentStartsAtExplicitConfirmationAfterLongPreview() async throws {
         let (root, store, dirs, assets, fake, _) = try fixture(); defer { try? FileManager.default.removeItem(at: root) }
         let clock = TestClock(initialOffset: -601)
@@ -73,6 +87,31 @@ struct GenerationServiceTests {
         let batch = try await service.submit(preview, confirmedHash: authorization.confirmationHash,
                                              clientRequestID: request.clientRequestID)
         #expect(try await store.getJob(id: batch.jobIDs[0])?.state == .success)
+        #expect(await fake.calls().count == 1)
+        try await store.close()
+    }
+
+    @Test func expiredUnconsumedConfirmationGetsFreshTokenButConsumedNonceStaysIdempotent() async throws {
+        let (root, store, dirs, assets, fake, _) = try fixture(); defer { try? FileManager.default.removeItem(at: root) }
+        let clock = TestClock(initialOffset: -601)
+        let service = GenerationService(store: store, directories: dirs, assets: assets, synthesizer: fake,
+                                        downloader: FakeAudioDownloader(), now: { clock.date })
+        let request = try await input(root, store, dirs)
+        let plan = try await service.preflight(request)
+        let stale = try await service.confirm(plan)
+        clock.advance(by: 601)
+        let fresh = try await service.confirm(plan)
+        #expect(fresh.confirmationHash != stale.confirmationHash)
+        #expect(fresh.submission.consent.confirmedAt > stale.submission.consent.confirmedAt)
+        await #expect(throws: GenerationError.confirmationMismatch) {
+            try await service.submit(plan, confirmedHash: stale.confirmationHash, clientRequestID: request.clientRequestID)
+        }
+        let batch = try await service.submit(plan, confirmedHash: fresh.confirmationHash, clientRequestID: request.clientRequestID)
+        clock.advance(by: 601)
+        let consumed = try await service.confirm(plan)
+        #expect(consumed.confirmationHash == fresh.confirmationHash)
+        #expect(try await service.submit(plan, confirmedHash: consumed.confirmationHash,
+            clientRequestID: request.clientRequestID).id == batch.id)
         #expect(await fake.calls().count == 1)
         try await store.close()
     }

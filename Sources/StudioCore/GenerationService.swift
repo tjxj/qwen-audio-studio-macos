@@ -148,7 +148,10 @@ public actor GenerationService {
         guard try plan.submission.requestHash() == plan.confirmationHash else { throw GenerationError.confirmationMismatch }
         if let existing = authorizations[plan.submission.clientRequestID] {
             guard existing.previewHash == plan.confirmationHash else { throw StudioStoreError.requestConflict }
-            return existing.authorization
+            if existing.consumedBatchID != nil { return existing.authorization }
+            let consent = existing.authorization.submission.consent
+            if consent.confirmedAt <= now(), consent.expiresAt > now() { return existing.authorization }
+            authorizations.removeValue(forKey: plan.submission.clientRequestID)
         }
         let consent = UploadConsent(clientRequestID: plan.submission.clientRequestID, references: plan.submission.references,
                                     confirmed: true, confirmedAt: now())
@@ -164,6 +167,15 @@ public actor GenerationService {
         authorizations[submission.clientRequestID] = AuthorizationEntry(previewHash: plan.confirmationHash,
                                                                           authorization: authorization, consumedBatchID: nil)
         return authorization
+    }
+
+    /// Dismissed charge sheets can invalidate an unused token. A submitted
+    /// batch remains durable and cannot be revoked through this method.
+    public func revokeAuthorization(_ authorization: GenerationAuthorization) {
+        guard let stored = authorizations[authorization.clientRequestID],
+              stored.authorization.confirmationHash == authorization.confirmationHash,
+              stored.consumedBatchID == nil else { return }
+        authorizations.removeValue(forKey: authorization.clientRequestID)
     }
 
     public func submit(_ plan: GenerationPlan, confirmedHash: String, clientRequestID: String) async throws -> StoredBatch {
