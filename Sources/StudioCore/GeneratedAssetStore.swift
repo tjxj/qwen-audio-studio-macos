@@ -82,7 +82,8 @@ public actor GeneratedAssetStore {
                 let url = URL(fileURLWithPath: original)
                 let suffix = "-恢复-" + UUID().uuidString
                 let name = url.deletingPathExtension().lastPathComponent + suffix + (url.pathExtension.isEmpty ? "" : "." + url.pathExtension)
-                return original.split(separator: "/").dropLast().joined(separator: "/") + "/" + name
+                let parent = original.split(separator: "/").dropLast().joined(separator: "/")
+                return parent.isEmpty ? name : parent + "/" + name
             }
             try await move(asset: asset, to: destination, kind: .restore, lease: lease)
         }
@@ -167,9 +168,9 @@ public actor GeneratedAssetStore {
         let bytes = try await readRegisteredAudio(id)
         if URL(fileURLWithPath: asset.relativePath).pathExtension.lowercased() == "pcm" {
             guard let job = try await store.getJob(id: asset.jobID),
-                  let batch = try await store.getBatch(id: job.batchID),
-                  batch.submission.project.fields.params.format == "pcm" else { throw AudioDecodeError.invalidAudio }
-            let params = batch.submission.project.fields.params
+                  let batch = try await store.getBatch(id: job.batchID) else { throw AudioDecodeError.invalidAudio }
+            let params = try await store.legacyJobSnapshot(id: job.id)?.params ?? batch.submission.project.fields.params
+            guard params.format == "pcm" else { throw AudioDecodeError.invalidAudio }
             return try AudioDecoder.decode(data: bytes, rawPCMFormat: RawPCMFormat(sampleRate: params.sampleRate, channels: params.channels))
         }
         return try AudioDecoder.decode(data: bytes)

@@ -3,7 +3,7 @@ import Foundation
 enum StudioSchema {
     static func migrate(_ db: SQLiteConnection) throws {
         let version = try db.rows("PRAGMA user_version").first?.first?.int ?? 0
-        guard version <= 5 else { throw StudioStoreError.unsupportedSchema(version) }
+        guard version <= 6 else { throw StudioStoreError.unsupportedSchema(version) }
         if version == 0 {
         try db.transaction {
             for statement in [
@@ -54,6 +54,12 @@ enum StudioSchema {
                 try db.execute("ALTER TABLE jobs ADD COLUMN created_at_ms INTEGER NOT NULL DEFAULT 0")
                 try db.execute("CREATE TABLE workspace_state (singleton INTEGER PRIMARY KEY CHECK(singleton=1), current_project_id TEXT REFERENCES projects(id))")
                 try db.execute("PRAGMA user_version = 5")
+            }
+        }
+        if version < 6 {
+            try db.transaction {
+                try db.execute("CREATE TABLE legacy_job_snapshots (job_id TEXT PRIMARY KEY NOT NULL REFERENCES jobs(id), snapshot BLOB NOT NULL)")
+                try db.execute("PRAGMA user_version = 6")
             }
         }
     }

@@ -49,12 +49,14 @@ public actor StudioStore {
             let values = try file.resourceValues(forKeys: keys)
             if values.isRegularFile == true && values.isSymbolicLink != true { total += Int64(values.fileSize ?? 0) }
         }
-        let voices = dataRoot.appendingPathComponent("ReferenceAudio", isDirectory: true)
-        if let entries = manager.enumerator(at: voices, includingPropertiesForKeys: Array(keys), options: [.skipsPackageDescendants]) {
-            for case let file as URL in entries {
-                let values = try file.resourceValues(forKeys: keys)
-                if values.isSymbolicLink == true { entries.skipDescendants(); continue }
-                if values.isRegularFile == true { total += Int64(values.fileSize ?? 0) }
+        for folder in ["ReferenceAudio", "LegacyAudio", "LegacyBackups"] {
+            let owned = dataRoot.appendingPathComponent(folder, isDirectory: true)
+            if let entries = manager.enumerator(at: owned, includingPropertiesForKeys: Array(keys), options: [.skipsPackageDescendants]) {
+                for case let file as URL in entries {
+                    let values = try file.resourceValues(forKeys: keys)
+                    if values.isSymbolicLink == true { entries.skipDescendants(); continue }
+                    if values.isRegularFile == true { total += Int64(values.fileSize ?? 0) }
+                }
             }
         }
         return total
@@ -96,19 +98,29 @@ public actor StudioStore {
             for batchID in Set(jobs.map(\.batchID)).sorted() {
                 let group = jobs.filter { $0.batchID == batchID }.sorted { $0.candidateIndex < $1.candidateIndex }
                 guard let first = group.first, let project = drafts[first.projectID], group.allSatisfy({ $0.projectID == first.projectID }),
-                      group.count <= 3 else { throw LegacyImportError.corrupt("批次关系无效。") }
+                      group.count <= 3,
+                      Set(group.map(\.candidateIndex)).count == group.count,
+                      group.allSatisfy({ (0...2).contains($0.candidateIndex) }),
+                      Set(group.map(\.seed)).count == group.count else { throw LegacyImportError.corrupt("批次版本或 Seed 关系无效。") }
                 let requestID = "import_" + batchID
                 let seeds = group.map(\.seed)
-                let submission = BatchSubmission(clientRequestID: requestID, project: project,
-                    compiledPrompt: project.fields.prompt, candidateSeeds: seeds, directory: directory, references: [],
+                var historical = project
+                historical.fields.name = first.snapshot.projectName
+                historical.fields.mode = first.snapshot.mode
+                historical.fields.prompt = first.snapshot.prompt
+                historical.fields.params = first.snapshot.params
+                let submission = BatchSubmission(clientRequestID: requestID, project: historical,
+                    compiledPrompt: first.snapshot.compiledPrompt, candidateSeeds: seeds, directory: directory, references: [],
                     consent: UploadConsent(clientRequestID: requestID, references: [], confirmed: false))
                 try db.execute("INSERT INTO batches(id,client_request_id,request_hash,project_id,submission) VALUES(?,?,?,?,?)",
                                [.text(batchID), .text(requestID), .text("historical-" + batchID), .text(project.id), .blob(try storeEncode(submission))])
-                for (index, job) in group.enumerated() {
+                for job in group {
                     try db.execute("INSERT INTO jobs(id,batch_id,candidate_index,seed,state,created_at_ms) VALUES(?,?,?,?,?,?)",
-                                   [.text(job.id), .text(batchID), .integer(index), .integer(job.seed), .text(job.state.rawValue), .integer(job.createdAtMS)])
+                                   [.text(job.id), .text(batchID), .integer(job.candidateIndex), .integer(job.seed), .text(job.state.rawValue), .integer(job.createdAtMS)])
                     try db.execute("INSERT INTO job_metadata(job_id,name,favorite,note) VALUES(?,?,?,?)",
                                    [.text(job.id), .text(job.displayName), .integer(job.favorite ? 1 : 0), .text(job.note)])
+                    try db.execute("INSERT INTO legacy_job_snapshots(job_id,snapshot) VALUES(?,?)",
+                                   [.text(job.id), .blob(try storeEncode(job.snapshot))])
                     if job.deleted {
                         try db.execute("INSERT INTO removed_jobs(job_id,scope) VALUES(?,'recordOnly')", [.text(job.id)])
                     }
@@ -332,6 +344,16 @@ public actor StudioStore {
         }
         return StoredBatch(id: id, requestHash: hash, submission: try storeDecode(BatchSubmission.self, row[1]), jobIDs: jobs)
     }
+    public func legacyJobSnapshot(id: String) throws -> LegacyJobSnapshot? {
+        try db.rows("SELECT snapshot FROM legacy_job_snapshots WHERE job_id=?", [.text(id)]).first.map {
+            try storeDecode(LegacyJobSnapshot.self, $0[0])
+        }
+    }
+    public func compiledPrompt(jobID: String) throws -> String {
+        if let historical = try legacyJobSnapshot(id: jobID) { return historical.compiledPrompt }
+        guard let job = try getJob(id: jobID), let batch = try getBatch(id: job.batchID) else { throw StudioStoreError.missing }
+        return batch.submission.compiledPrompt
+    }
 
     private static let jobColumns = "id,batch_id,candidate_index,seed,state,result_uncertain,message"
     private func job(_ row: [SQLiteValue]) throws -> StoredJob {
@@ -378,11 +400,11 @@ public actor StudioStore {
         var clauses = ["j.id NOT IN (SELECT job_id FROM removed_jobs)"]
         var parameters: [SQLiteValue] = []
         if let state = filter.state { clauses.append("j.state=?"); parameters.append(.text(state.rawValue)) }
-        if let mode = filter.mode { clauses.append("json_extract(CAST(b.submission AS TEXT),'$.project.fields.mode')=?"); parameters.append(.text(mode.rawValue)) }
+        if let mode = filter.mode { clauses.append("COALESCE(json_extract(CAST(ls.snapshot AS TEXT),'$.mode'),json_extract(CAST(b.submission AS TEXT),'$.project.fields.mode'))=?"); parameters.append(.text(mode.rawValue)) }
         if filter.favoriteOnly { clauses.append("COALESCE(m.favorite,0)=1") }
         if let since = filter.since { clauses.append("j.created_at_ms>=?"); parameters.append(.integer(Int(since.timeIntervalSince1970 * 1000))) }
         if !filter.search.isEmpty {
-            clauses.append("(json_extract(CAST(b.submission AS TEXT),'$.project.id') LIKE ? OR COALESCE(m.name,'') LIKE ? OR json_extract(CAST(b.submission AS TEXT),'$.project.fields.name') LIKE ? OR json_extract(CAST(b.submission AS TEXT),'$.project.fields.prompt') LIKE ?)")
+            clauses.append("(json_extract(CAST(b.submission AS TEXT),'$.project.id') LIKE ? OR COALESCE(m.name,'') LIKE ? OR COALESCE(json_extract(CAST(ls.snapshot AS TEXT),'$.projectName'),json_extract(CAST(b.submission AS TEXT),'$.project.fields.name')) LIKE ? OR COALESCE(json_extract(CAST(ls.snapshot AS TEXT),'$.prompt'),json_extract(CAST(b.submission AS TEXT),'$.project.fields.prompt')) LIKE ?)")
             let search = "%\(filter.search)%"
             parameters += [.text(search), .text(search), .text(search), .text(search)]
         }
@@ -391,7 +413,7 @@ public actor StudioStore {
             clauses.append("j.rowid<?"); parameters.append(.integer(before))
         }
         parameters.append(.integer(limit + 1))
-        let sql = "SELECT j.\(Self.jobColumns.replacingOccurrences(of: ",", with: ",j.")),b.submission,COALESCE(m.name,''),COALESCE(m.favorite,0),COALESCE(m.note,''),j.created_at_ms,CASE WHEN f.job_id IS NULL THEN 0 ELSE 1 END FROM jobs j JOIN batches b ON j.batch_id=b.id LEFT JOIN job_metadata m ON m.job_id=j.id LEFT JOIN batch_final f ON f.batch_id=j.batch_id AND f.job_id=j.id WHERE \(clauses.joined(separator: " AND ")) ORDER BY j.rowid DESC LIMIT ?"
+        let sql = "SELECT j.\(Self.jobColumns.replacingOccurrences(of: ",", with: ",j.")),b.submission,COALESCE(m.name,''),COALESCE(m.favorite,0),COALESCE(m.note,''),j.created_at_ms,CASE WHEN f.job_id IS NULL THEN 0 ELSE 1 END,ls.snapshot FROM jobs j JOIN batches b ON j.batch_id=b.id LEFT JOIN job_metadata m ON m.job_id=j.id LEFT JOIN batch_final f ON f.batch_id=j.batch_id AND f.job_id=j.id LEFT JOIN legacy_job_snapshots ls ON ls.job_id=j.id WHERE \(clauses.joined(separator: " AND ")) ORDER BY j.rowid DESC LIMIT ?"
         let rows = try db.rows(sql, parameters)
         let visible = Array(rows.prefix(limit))
         let items = try visible.map { row -> LibraryItem in
@@ -399,7 +421,15 @@ public actor StudioStore {
             guard let name = row[8].string, let favorite = row[9].int, let note = row[10].string,
                   let created = row[11].int, let isFinal = row[12].int else { throw StudioStoreError.corruptRecord }
             let submission = try storeDecode(BatchSubmission.self, row[7])
-            return LibraryItem(job: storedJob, project: submission.project,
+            var project = submission.project
+            if row[13].data != nil {
+                let historical = try storeDecode(LegacyJobSnapshot.self, row[13])
+                project.fields.name = historical.projectName
+                project.fields.mode = historical.mode
+                project.fields.prompt = historical.prompt
+                project.fields.params = historical.params
+            }
+            return LibraryItem(job: storedJob, project: project,
                                metadata: JobMetadata(name: name, favorite: favorite != 0, note: note),
                                createdAt: created == 0 ? .distantPast : Date(timeIntervalSince1970: Double(created) / 1000),
                                isFinal: isFinal != 0)

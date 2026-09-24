@@ -25,6 +25,7 @@ public struct LegacyImportCounts: Sendable {
     public let assets: Int
     public let issues: [String]
     public let fingerprint: String
+    public let lockFileAbsent: Bool
 }
 
 public struct LegacyImportReport: Sendable {
@@ -32,6 +33,11 @@ public struct LegacyImportReport: Sendable {
     public let importedJobs: Int
     public let copiedAssets: Int
     public let issues: [String]
+    public var readableText: String {
+        (["旧版作品导入结果", "\(importedProjects) 个项目 · \(importedJobs) 个任务 · \(copiedAssets) 个音频", "",
+          "需关注事项（\(issues.count)）："] + (issues.isEmpty ? ["无"] : issues.enumerated().map { "\($0.offset + 1). \($0.element)" }))
+            .joined(separator: "\n") + "\n"
+    }
 }
 
 struct LegacyProject: Sendable {
@@ -45,6 +51,14 @@ struct LegacyJob: Sendable {
     let state: JobState, favorite: Bool, outputAssetID: String?, candidateIndex: Int, seed: Int
     let createdAtMS: Int
     let deleted: Bool
+    let snapshot: LegacyJobSnapshot
+}
+public struct LegacyJobSnapshot: Codable, Equatable, Sendable {
+    public let projectName: String
+    public let mode: CreationMode
+    public let prompt: String
+    public let compiledPrompt: String
+    public let params: GenerationParams
 }
 struct LegacyAsset: Sendable { let id: String, source: URL, mime: String, ownerJobID: String? }
 struct LegacySnapshot: Sendable {
@@ -57,6 +71,7 @@ private final class LegacySourceLease: @unchecked Sendable {
     private let source: URL
     private let scoped: Bool
     private let descriptor: Int32
+    var hasCompatibleLock: Bool { descriptor >= 0 }
     init(_ source: URL) throws {
         guard source.isFileURL,
               (try? source.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])).map({ $0.isDirectory == true && $0.isSymbolicLink != true }) == true else { throw LegacyImportError.invalidSource }
@@ -84,24 +99,30 @@ public final class LegacyImporter: @unchecked Sendable {
     private let store: StudioStore
     public init(dataRoot: URL, store: StudioStore) { self.dataRoot = dataRoot; self.store = store }
 
-    public func preview(source: URL) throws -> LegacyImportCounts {
+    public func preview(source: URL, externalFolder: URL? = nil) throws -> LegacyImportCounts {
         let lease = try LegacySourceLease(source); defer { withExtendedLifetime(lease) {} }
-        let snapshot = try readUnlocked(source: source)
+        let externalLease = try externalFolder.map(LegacySourceLease.init); defer { withExtendedLifetime(externalLease) {} }
+        let snapshot = try readUnlocked(source: source, externalFolder: externalFolder)
         return LegacyImportCounts(projects: snapshot.projects.count, jobs: snapshot.jobs.count,
-                                  assets: snapshot.assets.count, issues: snapshot.issues, fingerprint: snapshot.fingerprint)
+                                  assets: snapshot.assets.count, issues: snapshot.issues, fingerprint: snapshot.fingerprint,
+                                  lockFileAbsent: !lease.hasCompatibleLock)
     }
 
     public func `import`(source: URL, preview: LegacyImportCounts,
+                         externalFolder: URL? = nil,
                          beforeActivation: (@Sendable () throws -> Void)? = nil) async throws -> LegacyImportReport {
         try await store.withFileJob("__legacy_import__") { [self] in
-            try await performImport(source: source, preview: preview, beforeActivation: beforeActivation)
+            try await performImport(source: source, preview: preview, externalFolder: externalFolder,
+                                    beforeActivation: beforeActivation)
         }
     }
 
     private func performImport(source: URL, preview: LegacyImportCounts,
+                               externalFolder: URL?,
                                beforeActivation: (@Sendable () throws -> Void)?) async throws -> LegacyImportReport {
         let lease = try LegacySourceLease(source); defer { withExtendedLifetime(lease) {} }
-        let snapshot = try readUnlocked(source: source)
+        let externalLease = try externalFolder.map(LegacySourceLease.init); defer { withExtendedLifetime(externalLease) {} }
+        let snapshot = try readUnlocked(source: source, externalFolder: externalFolder)
         guard snapshot.fingerprint == preview.fingerprint,
               snapshot.projects.count == preview.projects, snapshot.jobs.count == preview.jobs,
               snapshot.assets.count == preview.assets else { throw LegacyImportError.changedSource }
@@ -110,10 +131,17 @@ public final class LegacyImporter: @unchecked Sendable {
         let audioRoot = dataRoot.appendingPathComponent("LegacyAudio", isDirectory: true)
         let staged = audioRoot.appendingPathComponent(".stage_\(id)", isDirectory: true)
         let final = audioRoot.appendingPathComponent("import_\(id)", isDirectory: true)
+        let backup = dataRoot.appendingPathComponent("LegacyBackups/import_\(id)", isDirectory: true)
         try FileManager.default.createDirectory(at: staged, withIntermediateDirectories: true)
         try Data("QwenAudioStudioLegacyImport-v1".utf8).write(to: staged.appendingPathComponent(".import-marker"))
         var activated = false
-        defer { if !activated { try? FileManager.default.removeItem(at: staged); try? FileManager.default.removeItem(at: final) } }
+        defer {
+            if !activated {
+                try? FileManager.default.removeItem(at: staged)
+                try? FileManager.default.removeItem(at: final)
+                try? FileManager.default.removeItem(at: backup)
+            }
+        }
         var copied: [String: (name: String, identity: FileIdentity)] = [:]
         var issues = snapshot.issues
         for asset in snapshot.assets {
@@ -121,12 +149,8 @@ public final class LegacyImporter: @unchecked Sendable {
                 issues.append("音频 \(asset.id)：缺少任务归属，本次未复制。")
                 continue
             }
-            guard Self.safeAsset(asset.source, inside: source) else {
+            guard let root = Self.authorizedRoot(for: asset.source, source: source, externalFolder: externalFolder) else {
                 issues.append("音频 \(asset.id)：位于所选数据目录外，需单独授权。")
-                continue
-            }
-            guard (try? asset.source.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])).map({ $0.isRegularFile == true && $0.isSymbolicLink != true }) == true else {
-                issues.append("音频 \(asset.id)：源文件缺失。")
                 continue
             }
             let ext = asset.source.pathExtension.lowercased()
@@ -136,16 +160,14 @@ public final class LegacyImporter: @unchecked Sendable {
             }
             let name = "asset_\(UUID().uuidString).\(ext)"
             let destination = staged.appendingPathComponent(name)
-            do { try Self.copyNoFollow(from: asset.source, to: destination) }
-            catch LegacyImportError.unsafeAsset {
-                try? FileManager.default.removeItem(at: destination)
-                issues.append("音频 \(asset.id)：源文件不可安全读取。")
+            guard let data = try? Self.authorizedData(asset.source, root: root) else {
+                issues.append("音频 \(asset.id)：源文件缺失或包含符号链接。")
                 continue
             }
+            try Self.writeStaged(data, to: destination)
             copied[asset.id] = (name, try Self.identity(destination))
         }
         // Source backup is private and write-once; source data and its mtime remain untouched.
-        let backup = dataRoot.appendingPathComponent("LegacyBackups/import_\(id)", isDirectory: true)
         try FileManager.default.createDirectory(at: backup, withIntermediateDirectories: true)
         try Data(snapshot.fingerprint.utf8).write(to: backup.appendingPathComponent("source.sha256"))
         if FileManager.default.fileExists(atPath: source.appendingPathComponent("studio.sqlite3").path) {
@@ -170,14 +192,14 @@ public final class LegacyImporter: @unchecked Sendable {
             let assetFile = source.appendingPathComponent("assets.json")
             if FileManager.default.fileExists(atPath: assetFile.path) { try FileManager.default.copyItem(at: assetFile, to: backup.appendingPathComponent("assets.json")) }
         }
-        guard try readUnlocked(source: source).fingerprint == snapshot.fingerprint else { throw LegacyImportError.changedSource }
+        guard try readUnlocked(source: source, externalFolder: externalFolder).fingerprint == snapshot.fingerprint else { throw LegacyImportError.changedSource }
         try FileManager.default.moveItem(at: staged, to: final)
         let directory = DirectorySnapshot(id: "legacy_dir_\(id)", version: 1, bookmark: Data("app-owned-legacy-v1".utf8),
                                           rootIdentity: try Self.identity(final))
         let storedAssets = snapshot.assets.compactMap { old -> LegacyImportedAsset? in
             guard let jobID = old.ownerJobID, let file = copied[old.id] else { return nil }
             return LegacyImportedAsset(asset: StoredAsset(id: old.id, jobID: jobID, directoryID: directory.id,
-                                                           relativePath: file.name, kind: "generated_audio", appOwned: true,
+                                                           relativePath: file.name, kind: "audio", appOwned: true,
                                                            fileIdentity: file.identity))
         }
         try beforeActivation?()
@@ -192,27 +214,51 @@ public final class LegacyImporter: @unchecked Sendable {
     /// directory are eligible. User-selected output folders are never scanned.
     public func recoverAbandonedStages() async throws {
         let root = dataRoot.appendingPathComponent("LegacyAudio", isDirectory: true)
-        guard FileManager.default.fileExists(atPath: root.path) else { return }
-        for url in try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isDirectoryKey]) {
-            let name = url.lastPathComponent
-            let suffix: String
-            if name.hasPrefix(".stage_") { suffix = String(name.dropFirst(7)) }
-            else if name.hasPrefix("import_") { suffix = String(name.dropFirst(7)) }
-            else { continue }
-            guard UUID(uuidString: suffix) != nil,
-                  (try? Data(contentsOf: url.appendingPathComponent(".import-marker"))) == Data("QwenAudioStudioLegacyImport-v1".utf8),
-                  try await store.getDirectory(id: "legacy_dir_\(suffix)") == nil else { continue }
-            try FileManager.default.removeItem(at: url)
+        if FileManager.default.fileExists(atPath: root.path) {
+            for url in try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isDirectoryKey]) {
+                let name = url.lastPathComponent
+                let suffix: String
+                if name.hasPrefix(".stage_") { suffix = String(name.dropFirst(7)) }
+                else if name.hasPrefix("import_") { suffix = String(name.dropFirst(7)) }
+                else { continue }
+                guard UUID(uuidString: suffix) != nil,
+                      (try? Data(contentsOf: url.appendingPathComponent(".import-marker"))) == Data("QwenAudioStudioLegacyImport-v1".utf8),
+                      try await store.getDirectory(id: "legacy_dir_\(suffix)") == nil else { continue }
+                try FileManager.default.removeItem(at: url)
+            }
+        }
+        let backups = dataRoot.appendingPathComponent("LegacyBackups", isDirectory: true)
+        if FileManager.default.fileExists(atPath: backups.path) {
+            for url in try FileManager.default.contentsOfDirectory(at: backups, includingPropertiesForKeys: [.isDirectoryKey]) {
+                let name = url.lastPathComponent
+                guard name.hasPrefix("import_"),
+                      let uuid = UUID(uuidString: String(name.dropFirst(7))),
+                      let digest = try? String(contentsOf: url.appendingPathComponent("source.sha256"), encoding: .utf8),
+                      digest.count == 64,
+                      digest.unicodeScalars.allSatisfy({ CharacterSet(charactersIn: "0123456789abcdef").contains($0) }),
+                      try await store.getDirectory(id: "legacy_dir_\(uuid.uuidString)") == nil else { continue }
+                try FileManager.default.removeItem(at: url)
+            }
         }
     }
 
-    private func readUnlocked(source: URL) throws -> LegacySnapshot {
+    private func readUnlocked(source: URL, externalFolder: URL?) throws -> LegacySnapshot {
         let sqlite = source.appendingPathComponent("studio.sqlite3")
-        if FileManager.default.fileExists(atPath: sqlite.path) { return try readV2(source: source) }
-        return try readV1(source: source)
+        let snapshot = try FileManager.default.fileExists(atPath: sqlite.path)
+            ? readV2(source: source, externalFolder: externalFolder)
+            : readV1(source: source, externalFolder: externalFolder)
+        var hash = SHA256()
+        hash.update(data: Data(snapshot.fingerprint.utf8))
+        for asset in snapshot.assets.sorted(by: { $0.id < $1.id }) {
+            guard let root = Self.authorizedRoot(for: asset.source, source: source, externalFolder: externalFolder),
+                  let data = try? Self.authorizedData(asset.source, root: root) else { continue }
+            hash.update(data: Data(asset.id.utf8)); hash.update(data: data)
+        }
+        return LegacySnapshot(projects: snapshot.projects, jobs: snapshot.jobs, assets: snapshot.assets,
+                              issues: snapshot.issues, fingerprint: Self.hex(hash.finalize()))
     }
 
-    private func readV1(source: URL) throws -> LegacySnapshot {
+    private func readV1(source: URL, externalFolder: URL?) throws -> LegacySnapshot {
         var files: [URL] = []
         for folder in ["projects", "jobs"] {
             let dir = source.appendingPathComponent(folder)
@@ -240,7 +286,7 @@ public final class LegacyImporter: @unchecked Sendable {
                     throw LegacyImportError.corrupt("\(url.lastPathComponent) 的 ID 不符。")
                 }
                 if url.deletingLastPathComponent().lastPathComponent == "projects" { projects.append(try Self.project(dict)) }
-                else { jobs.append(try Self.job(dict)) }
+                else { jobs.append(try Self.job(dict, project: projects.first { $0.id == dict["project_id"] as? String })) }
             }
         }
         var jobOwners: [String: String] = [:]
@@ -250,10 +296,10 @@ public final class LegacyImporter: @unchecked Sendable {
             assets.append(LegacyAsset(id: id, source: Self.assetURL(path, source: source), mime: record["mime_type"] as? String ?? "application/octet-stream", ownerJobID: jobOwners[id]))
         }
         return try Self.validate(LegacySnapshot(projects: projects, jobs: jobs, assets: assets,
-            issues: Self.assetIssues(assets, source: source) + Self.voiceIssues(projects), fingerprint: Self.hex(hash.finalize())))
+            issues: Self.assetIssues(assets, source: source, externalFolder: externalFolder) + Self.voiceIssues(projects), fingerprint: Self.hex(hash.finalize())))
     }
 
-    private func readV2(source: URL) throws -> LegacySnapshot {
+    private func readV2(source: URL, externalFolder: URL?) throws -> LegacySnapshot {
         let scratch = FileManager.default.temporaryDirectory.appendingPathComponent("legacy-sqlite-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: scratch, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: scratch) }
@@ -272,16 +318,18 @@ public final class LegacyImporter: @unchecked Sendable {
         defer { try? copiedDB.close() }
         do {
             let projects = try copiedDB.rows("SELECT id,name,mode,prompt,params_json,revision,archived,final_job_id,deleted_at,reference_bindings_json FROM projects ORDER BY id").map { row in
-                try Self.project(["id":row[0].string ?? "", "name":row[1].string ?? "", "mode":row[2].string ?? "", "prompt":row[3].string ?? "", "params":Self.json(row[4].string), "revision":row[5].int ?? 1, "archived":(row[6].int ?? 0) != 0,
+                try Self.project(["id":row[0].string ?? "", "name":row[1].string ?? "", "mode":row[2].string ?? "", "prompt":row[3].string ?? "", "params":Self.requiredJSON(row[4].string), "revision":row[5].int ?? 1, "archived":(row[6].int ?? 0) != 0,
                                   "final_job_id":row[7].string as Any, "deleted_at":row[8].string as Any,
-                                  "reference_bindings":Self.jsonArray(row[9].string)])
+                                  "reference_bindings":Self.requiredJSONArray(row[9].string)])
             }
-            let jobs = try copiedDB.rows("SELECT id,project_id,batch_id,display_name,note,status,favorite,output_asset_id,variant_index,params_json,created_at,deleted_at FROM jobs ORDER BY id").map { row in
+            let jobs = try copiedDB.rows("SELECT id,project_id,batch_id,display_name,note,status,favorite,output_asset_id,variant_index,params_json,created_at,deleted_at,project_name,mode,prompt,compiled_prompt FROM jobs ORDER BY id").map { row in
                 try Self.job(["id":row[0].string ?? "", "project_id":row[1].string ?? "", "batch_id":row[2].string as Any,
                               "display_name":row[3].string ?? "", "note":row[4].string ?? "", "status":row[5].string ?? "interrupted",
                               "favorite":(row[6].int ?? 0) != 0, "output_asset_id":row[7].string as Any,
-                              "variant_index":row[8].int ?? 0, "params":Self.json(row[9].string), "created_at":row[10].string ?? "",
-                              "deleted_at":row[11].string as Any])
+                              "variant_index":row[8].int ?? 0, "params":Self.requiredJSON(row[9].string), "created_at":row[10].string ?? "",
+                              "deleted_at":row[11].string as Any, "project_name":row[12].string as Any,
+                              "mode":row[13].string as Any, "prompt":row[14].string as Any,
+                              "compiled_prompt":row[15].string as Any], project: projects.first { $0.id == row[1].string })
             }
             var owners: [String: String] = [:]
             for job in jobs { if let assetID = job.outputAssetID { owners[assetID] = owners[assetID] ?? job.id } }
@@ -290,7 +338,7 @@ public final class LegacyImporter: @unchecked Sendable {
                 return LegacyAsset(id: id, source: Self.assetURL(path, source: source), mime: row[2].string ?? "application/octet-stream", ownerJobID: owners[id])
             }
             return try Self.validate(LegacySnapshot(projects: projects, jobs: jobs, assets: assets,
-                issues: Self.assetIssues(assets, source: source) + Self.voiceIssues(projects), fingerprint: Self.hex(hash.finalize())))
+                issues: Self.assetIssues(assets, source: source, externalFolder: externalFolder) + Self.voiceIssues(projects), fingerprint: Self.hex(hash.finalize())))
         } catch { throw LegacyImportError.corrupt("SQLite 快照无法读取或校验：\(error.localizedDescription)") }
     }
 
@@ -303,18 +351,25 @@ public final class LegacyImporter: @unchecked Sendable {
             finalJobID: object["final_job_id"] as? String,
             params: params(object["params"]), hadVoiceBindings: !(object["reference_bindings"] as? [Any] ?? []).isEmpty)
     }
-    private static func job(_ object: [String: Any]) throws -> LegacyJob {
+    private static func job(_ object: [String: Any], project: LegacyProject?) throws -> LegacyJob {
         guard let id = object["id"] as? String, safeID(id), let projectID = object["project_id"] as? String, safeID(projectID) else { throw LegacyImportError.corrupt("任务 ID 无效。") }
         let status = object["status"] as? String ?? "interrupted"
         let state: JobState = status == "success" ? .success : status == "failed" ? .failed : status == "cancelled" ? .cancelled : .interrupted
         let batch = object["batch_id"] as? String ?? "legacy_batch_\(id)"
         guard safeID(batch) else { throw LegacyImportError.corrupt("批次 ID 无效。") }
+        guard let project else { throw LegacyImportError.corrupt("任务指向缺失项目。") }
+        let prompt = object["prompt"] as? String ?? project.prompt
+        let snapshot = LegacyJobSnapshot(projectName: object["project_name"] as? String ?? project.name,
+            mode: CreationMode(rawValue: object["mode"] as? String ?? project.mode.rawValue) ?? project.mode,
+            prompt: prompt, compiledPrompt: object["compiled_prompt"] as? String ?? prompt,
+            params: (object["params"] as? [String: Any]).map { $0.isEmpty ? project.params : Self.params($0) } ?? project.params)
         let date = ISO8601DateFormatter().date(from: object["created_at"] as? String ?? "") ?? Date(timeIntervalSince1970: 0)
         return LegacyJob(id: id, projectID: projectID, batchID: batch, displayName: object["display_name"] as? String ?? id,
             note: object["note"] as? String ?? "", state: state, favorite: object["favorite"] as? Bool ?? false,
             outputAssetID: object["output_asset_id"] as? String, candidateIndex: object["variant_index"] as? Int ?? 0,
             seed: (object["params"] as? [String: Any])?["seed"] as? Int ?? 42,
-            createdAtMS: Int(date.timeIntervalSince1970 * 1000), deleted: object["deleted_at"] is String)
+            createdAtMS: Int(date.timeIntervalSince1970 * 1000), deleted: object["deleted_at"] is String,
+            snapshot: snapshot)
     }
     private static func params(_ raw: Any?) -> GenerationParams {
         let dict = raw as? [String: Any] ?? [:]
@@ -340,10 +395,17 @@ public final class LegacyImporter: @unchecked Sendable {
         return LegacySnapshot(projects: snapshot.projects, jobs: snapshot.jobs, assets: snapshot.assets,
                               issues: snapshot.issues + missing, fingerprint: snapshot.fingerprint)
     }
-    private static func assetIssues(_ assets: [LegacyAsset], source: URL) -> [String] {
+    private static func assetIssues(_ assets: [LegacyAsset], source: URL, externalFolder: URL?) -> [String] {
         assets.compactMap { asset in
-            if !safeAsset(asset.source, inside: source) { return "音频 \(asset.id)：位于所选数据目录外，需单独授权。" }
-            return FileManager.default.fileExists(atPath: asset.source.path) ? nil : "音频 \(asset.id)：源文件缺失。"
+            guard let root = authorizedRoot(for: asset.source, source: source, externalFolder: externalFolder) else {
+                return "音频 \(asset.id)：位于所选数据目录外，需单独授权。"
+            }
+            guard let relative = relativeAssetPath(asset.source, root: root),
+                  let access = try? ScopedFileAccess(url: root),
+                  (try? access.identity(relative)) != nil else {
+                return "音频 \(asset.id)：源文件缺失或包含符号链接。"
+            }
+            return nil
         }
     }
     private static func voiceIssues(_ projects: [LegacyProject]) -> [String] {
@@ -357,17 +419,37 @@ public final class LegacyImporter: @unchecked Sendable {
         var info = stat()
         return lstat(url.path, &info) == 0 && (info.st_mode & mode_t(S_IFMT)) == mode_t(S_IFREG)
     }
-    private static func safeAsset(_ url: URL, inside root: URL) -> Bool {
-        guard url.isFileURL, url.standardizedFileURL.path.hasPrefix(root.standardizedFileURL.path + "/") else { return false }
-        return url.resolvingSymlinksInPath().path.hasPrefix(root.resolvingSymlinksInPath().path + "/")
+    private static func authorizedRoot(for asset: URL, source: URL, externalFolder: URL?) -> URL? {
+        if relativeAssetPath(asset, root: source) != nil { return source }
+        if let externalFolder, relativeAssetPath(asset, root: externalFolder) != nil { return externalFolder }
+        return nil
     }
-    private static func json(_ string: String?) -> [String: Any] {
-        guard let string, let data = string.data(using: .utf8) else { return [:] }
-        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] ?? [:]
+    private static func relativeAssetPath(_ asset: URL, root: URL) -> String? {
+        guard asset.isFileURL, root.isFileURL else { return nil }
+        let base = root.standardizedFileURL.path + "/"
+        let path = asset.standardizedFileURL.path
+        guard path.hasPrefix(base), path.count > base.count else { return nil }
+        return String(path.dropFirst(base.count))
     }
-    private static func jsonArray(_ string: String?) -> [Any] {
-        guard let string, let data = string.data(using: .utf8) else { return [] }
-        return (try? JSONSerialization.jsonObject(with: data)) as? [Any] ?? []
+    private static func authorizedData(_ asset: URL, root: URL) throws -> Data {
+        guard let relative = relativeAssetPath(asset, root: root) else { throw LegacyImportError.unsafeAsset }
+        let access = try ScopedFileAccess(url: root)
+        let identity = try access.identity(relative)
+        return try access.read(relative, expected: identity, maximumBytes: 256 * 1024 * 1024)
+    }
+    private static func requiredJSON(_ string: String?) throws -> [String: Any] {
+        guard let string, let data = string.data(using: .utf8),
+              let value = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw LegacyImportError.corrupt("参数 JSON 损坏。")
+        }
+        return value
+    }
+    private static func requiredJSONArray(_ string: String?) throws -> [Any] {
+        guard let string, let data = string.data(using: .utf8),
+              let value = try? JSONSerialization.jsonObject(with: data) as? [Any] else {
+            throw LegacyImportError.corrupt("音色绑定 JSON 损坏。")
+        }
+        return value
     }
     private static func assetURL(_ path: String, source: URL) -> URL {
         path.hasPrefix("/") ? URL(fileURLWithPath: path) : source.appendingPathComponent(path)
@@ -378,25 +460,14 @@ public final class LegacyImporter: @unchecked Sendable {
         guard lstat(url.path, &info) == 0 else { throw LegacyImportError.unsafeAsset }
         return FileIdentity(device: Int32(info.st_dev), inode: UInt64(info.st_ino))
     }
-    private static func copyNoFollow(from source: URL, to destination: URL) throws {
-        let input = open(source.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
-        guard input >= 0 else { throw LegacyImportError.unsafeAsset }
-        defer { Darwin.close(input) }
-        var info = stat()
-        guard fstat(input, &info) == 0, (info.st_mode & mode_t(S_IFMT)) == mode_t(S_IFREG) else { throw LegacyImportError.unsafeAsset }
+    private static func writeStaged(_ data: Data, to destination: URL) throws {
         let output = open(destination.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, S_IRUSR | S_IWUSR)
         guard output >= 0 else { throw LegacyImportError.stagingFailed }
         defer { Darwin.close(output) }
-        var buffer = [UInt8](repeating: 0, count: 64 * 1024)
-        while true {
-            let count = read(input, &buffer, buffer.count)
-            guard count >= 0 else { throw LegacyImportError.unsafeAsset }
-            if count == 0 { break }
+        try data.withUnsafeBytes { buffer in
             var written = 0
-            while written < count {
-                let result = buffer.withUnsafeBytes { raw in
-                    write(output, raw.baseAddress!.advanced(by: written), count - written)
-                }
+            while written < buffer.count {
+                let result = write(output, buffer.baseAddress!.advanced(by: written), buffer.count - written)
                 guard result > 0 else { throw LegacyImportError.stagingFailed }
                 written += result
             }

@@ -221,7 +221,7 @@ struct OutputDirectoryTests {
         let project = try await f.store.createProject(fields: DraftFields(prompt: "迁移保留"))
         try await f.store.close()
         let raw = try SQLiteConnection(url: f.root.appendingPathComponent("metadata/studio.sqlite"))
-        for table in ["workspace_state", "project_metadata", "batch_final", "job_metadata", "reference_cleanup", "recycled_assets", "removed_jobs", "job_output_folders", "output_settings"] { try raw.execute("DROP TABLE \(table)") }
+        for table in ["legacy_job_snapshots", "workspace_state", "project_metadata", "batch_final", "job_metadata", "reference_cleanup", "recycled_assets", "removed_jobs", "job_output_folders", "output_settings"] { try raw.execute("DROP TABLE \(table)") }
         try raw.execute("ALTER TABLE jobs DROP COLUMN created_at_ms")
         try raw.execute("ALTER TABLE reference_voices DROP COLUMN last_used_ms")
         try raw.execute("PRAGMA user_version = 1")

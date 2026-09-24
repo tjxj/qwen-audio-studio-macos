@@ -3,6 +3,27 @@ import StudioCore
 import AppKit
 import Observation
 
+@MainActor enum LibraryAudioAssetLookup {
+    static func audioAsset(store: StudioStore, jobID: String) async throws -> StoredAsset {
+        guard let asset = try await store.listAssets(jobID: jobID).first(where: { $0.kind == "audio" }) else {
+            throw StudioStoreError.missing
+        }
+        return asset
+    }
+    static func candidates(store: StudioStore, batchID: String) async throws -> [ResultCandidate] {
+        guard let batch = try await store.getBatch(id: batchID) else { throw StudioStoreError.missing }
+        let finalID = try await store.finalJobID(batchID: batchID)
+        var result: [ResultCandidate] = []
+        for id in batch.jobIDs {
+            guard let job = try await store.getJob(id: id) else { continue }
+            let assetID = try? await audioAsset(store: store, jobID: id).id
+            result.append(ResultCandidate(id: id, number: job.candidateIndex + 1, state: job.state,
+                                          assetID: assetID, isFinal: id == finalID))
+        }
+        return result
+    }
+}
+
 @MainActor @Observable final class LibraryRowsState {
     private(set) var items: [StudioCore.LibraryItem] = []
     private(set) var nextBeforeID: String?
@@ -253,7 +274,7 @@ struct LibraryScreen: View {
                     }
                 }
                 HStack {
-                    Button("复制 Prompt") { Task { await copyPrompt(item.job.batchID) } }
+                    Button("复制 Prompt") { Task { await copyPrompt(item.job.id) } }
                     Button("继续创作") { onContinue(item.project) }
                     Button("设为最终版本") { Task { await makeFinal(item) } }.disabled(item.job.state != .success)
                 }.buttonStyle(.bordered)
@@ -425,10 +446,8 @@ struct LibraryScreen: View {
         catch { feedback = "恢复失败，请重新授权原输出文件夹。" }
     }
     private func audioAsset(_ id: String) async throws -> StoredAsset {
-        guard let state, let asset = try await state.store.listAssets(jobID: id).first(where: { $0.kind == "audio" }) else {
-            throw StudioStoreError.missing
-        }
-        return asset
+        guard let state else { throw StudioStoreError.missing }
+        return try await LibraryAudioAssetLookup.audioAsset(store: state.store, jobID: id)
     }
     private func inspectSelectedAudio() async {
         audioReady = false; selectedAudioAsset = nil; downloadRetryEligible = false
@@ -458,15 +477,7 @@ struct LibraryScreen: View {
     private func showResult(_ batchID: String) async {
         guard let state else { return }
         do {
-            guard let batch = try await state.store.getBatch(id: batchID) else { throw StudioStoreError.missing }
-            let finalID = try await state.store.finalJobID(batchID: batchID)
-            var candidates: [ResultCandidate] = []
-            for id in batch.jobIDs {
-                guard let job = try await state.store.getJob(id: id) else { continue }
-                let assetID = try await state.store.listAssets(jobID: id).first(where: { $0.kind == "audio" })?.id
-                candidates.append(ResultCandidate(id: id, number: job.candidateIndex + 1, state: job.state, assetID: assetID,
-                                                  isFinal: id == finalID))
-            }
+            let candidates = try await LibraryAudioAssetLookup.candidates(store: state.store, batchID: batchID)
             result = ResultScreenController(candidates: candidates, assets: state.assets)
         } catch { feedback = "版本详情无法打开，请检查本地记录。" }
     }
@@ -486,18 +497,18 @@ struct LibraryScreen: View {
             feedback = "音频已导出到所选位置。"
         } catch { feedback = "音频导出失败，请检查文件和输出权限。" }
     }
-    private func copyPrompt(_ batchID: String) async {
-        guard let state, let batch = try? await state.store.getBatch(id: batchID) else { return }
+    private func copyPrompt(_ jobID: String) async {
+        guard let state, let prompt = try? await state.store.compiledPrompt(jobID: jobID) else { return }
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(batch.submission.compiledPrompt, forType: .string)
+        NSPasteboard.general.setString(prompt, forType: .string)
     }
     private func exportReport(_ item: StudioCore.LibraryItem) async {
         guard let state else { return }
         do {
-            guard let batch = try await state.store.getBatch(id: item.job.batchID) else { throw StudioStoreError.missing }
+            let prompt = try await state.store.compiledPrompt(jobID: item.job.id)
             let report = ["model": "qwen-audio-3.1-tts-next", "project": item.project.fields.name,
                           "job_id": item.job.id, "state": item.job.state.rawValue,
-                          "prompt": batch.submission.compiledPrompt, "note": rows.note]
+                          "prompt": prompt, "note": rows.note]
             let bytes = try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
             let panel = NSSavePanel(); panel.nameFieldStringValue = "qwen-result-\(item.job.candidateIndex + 1).json"
             guard await panel.begin() == .OK, let url = panel.url else { return }

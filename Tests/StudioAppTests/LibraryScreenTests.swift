@@ -92,4 +92,36 @@ import Testing
         try? await Task.sleep(for: .milliseconds(60))
         #expect(refreshes == stoppedCount)
     }
+
+    @Test func importedAudioIsEligibleForLibraryResultAndDownloadBytes() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("legacy-library-" + UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("old")
+        try FileManager.default.createDirectory(at: source.appendingPathComponent("projects"), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: source.appendingPathComponent("jobs"), withIntermediateDirectories: true)
+        let tone = URL(fileURLWithPath: #filePath).deletingLastPathComponent().deletingLastPathComponent()
+            .appendingPathComponent("StudioCoreTests/Fixtures/ReferenceAudio/tone.wav")
+        let audio = source.appendingPathComponent("output/tone.wav")
+        try FileManager.default.createDirectory(at: audio.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let expected = try Data(contentsOf: tone)
+        try expected.write(to: audio)
+        try Data(#"{"id":"project-ui","name":"合成旧作品","mode":"podcast","prompt":"你好","final_job_id":"job-ui"}"#.utf8)
+            .write(to: source.appendingPathComponent("projects/project-ui.json"))
+        try Data(#"{"id":"job-ui","project_id":"project-ui","status":"success","output_asset_id":"asset-ui"}"#.utf8)
+            .write(to: source.appendingPathComponent("jobs/job-ui.json"))
+        let records = ["asset-ui":["path":audio.path]]
+        try JSONSerialization.data(withJSONObject: records).write(to: source.appendingPathComponent("assets.json"))
+        let store = try StudioStore(dataRoot: root.appendingPathComponent("new"))
+        let importer = LegacyImporter(dataRoot: root.appendingPathComponent("new"), store: store)
+        _ = try await importer.import(source: source, preview: importer.preview(source: source))
+        let asset = try await LibraryAudioAssetLookup.audioAsset(store: store, jobID: "job-ui")
+        let candidates = try await LibraryAudioAssetLookup.candidates(store: store, batchID: "legacy_batch_job-ui")
+        #expect(candidates.count == 1 && candidates[0].assetID == asset.id && candidates[0].isFinal)
+        let generated = GeneratedAssetStore(store: store, directories: OutputDirectoryStore(store: store))
+        #expect(try await generated.readRegisteredAudio(asset.id) == expected)
+        let result = ResultScreenController(candidates: candidates, assets: generated)
+        await result.validate()
+        #expect(result.rows.first?.status == .ready)
+        try await store.close()
+    }
 }

@@ -21,4 +21,11 @@ import Testing
         #expect(try await store.listProjects().map(\.id) == ["project-ui"])
         try await store.close()
     }
+    @Test func readableReportContainsEveryIssueWithoutTruncation() {
+        let report = LegacyImportReport(importedProjects: 2, importedJobs: 3, copiedAssets: 1,
+                                        issues: ["缺少音频 A", "缺少音频 B", "旧音色需重选", "外部目录需授权"])
+        let text = report.readableText
+        #expect(text.contains("2 个项目"))
+        for issue in report.issues { #expect(text.contains(issue)) }
+    }
 }
