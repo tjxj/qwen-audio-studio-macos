@@ -1,14 +1,77 @@
 import SwiftUI
 import StudioCore
 import AppKit
+import Observation
+
+@MainActor @Observable final class LibraryRowsState {
+    private(set) var items: [StudioCore.LibraryItem] = []
+    private(set) var nextBeforeID: String?
+    private(set) var selectedJobID: String?
+    private(set) var loadedPages = 1
+    private(set) var pinnedSelectedJobID: String?
+    private(set) var name = ""
+    private(set) var note = ""
+    private var nameDirty = false
+    private var noteDirty = false
+    var hasUnsavedEdits: Bool { nameDirty || noteDirty }
+    var selected: StudioCore.LibraryItem? { items.first { $0.job.id == selectedJobID } }
+
+    func editName(_ value: String) { name = value; nameDirty = true }
+    func editNote(_ value: String) { note = value; noteDirty = true }
+    func select(_ id: String) {
+        guard items.contains(where: { $0.job.id == id }) else { return }
+        selectedJobID = id
+        loadStoredMetadata()
+    }
+    func markSaved() { nameDirty = false; noteDirty = false; pinnedSelectedJobID = nil }
+    func apply(pages: [LibraryPage], reset: Bool, retainedSelection: StudioCore.LibraryItem? = nil) {
+        items = pages.flatMap(\.items)
+        nextBeforeID = pages.last?.nextBeforeID
+        loadedPages = reset ? 1 : max(loadedPages, pages.count)
+        pinnedSelectedJobID = nil
+        if !reset, hasUnsavedEdits, let retainedSelection,
+           retainedSelection.job.id == selectedJobID,
+           !items.contains(where: { $0.job.id == selectedJobID }) {
+            items.insert(retainedSelection, at: 0)
+            pinnedSelectedJobID = retainedSelection.job.id
+        }
+        if !items.contains(where: { $0.job.id == selectedJobID }) {
+            selectedJobID = items.first(where: { $0.job.state == .success })?.job.id ?? items.first?.job.id
+            loadStoredMetadata()
+        } else if let selected {
+            if !nameDirty { name = selected.metadata.name }
+            if !noteDirty { note = selected.metadata.note }
+        }
+    }
+    func append(_ page: LibraryPage) {
+        items += page.items.filter { next in !items.contains(where: { $0.job.id == next.job.id }) }
+        nextBeforeID = page.nextBeforeID
+        loadedPages += 1
+    }
+    private func loadStoredMetadata() {
+        name = selected?.metadata.name ?? ""
+        note = selected?.metadata.note ?? ""
+        nameDirty = false; noteDirty = false
+        pinnedSelectedJobID = nil
+    }
+}
 
 @MainActor final class LibraryLiveRefresh {
+    /// A status filter can hide every queued row just before one becomes a
+    /// matching result. The visible list is deliberately not the poll gate.
+    static func shouldRefresh(tab: Int, loading: Bool, visibleRows: [StudioCore.LibraryItem]) -> Bool {
+        tab == 0 && !loading
+    }
+    func tick(shouldRefresh: @MainActor () -> Bool,
+              refresh: @MainActor () async -> Void) async {
+        if shouldRefresh() { await refresh() }
+    }
     func run(interval: Duration = .seconds(1), shouldRefresh: @escaping @MainActor () -> Bool,
              refresh: @escaping @MainActor () async -> Void) async {
         while !Task.isCancelled {
             do { try await Task.sleep(for: interval) } catch { break }
             guard !Task.isCancelled else { break }
-            if shouldRefresh() { await refresh() }
+            await tick(shouldRefresh: shouldRefresh, refresh: refresh)
         }
     }
 }
@@ -24,14 +87,11 @@ struct LibraryScreen: View {
     @State private var favoriteOnly = false
     @State private var recentDays = 0
     @State private var archivedOnly = false
-    @State private var jobs: [StudioCore.LibraryItem] = []
+    @State private var rows = LibraryRowsState()
     @State private var projects: [ProjectDraft] = []
     @State private var removed: [StoredJob] = []
-    @State private var selectedJobID: String?
     @State private var selectedProjectID: String?
-    @State private var nextBeforeID: String?
-    @State private var name = ""
-    @State private var note = ""
+    @State private var selectedRemovedJobID: String?
     @State private var feedback: String?
     @State private var result: ResultScreenController?
     @State private var loading = false
@@ -41,7 +101,7 @@ struct LibraryScreen: View {
     @State private var downloadRetryEligible = false
     @State private var retryingDownload = false
 
-    private var selected: StudioCore.LibraryItem? { jobs.first { $0.job.id == selectedJobID } }
+    private var selected: StudioCore.LibraryItem? { rows.selected }
     private var selectedProject: ProjectDraft? { projects.first { $0.id == selectedProjectID } }
     private var accent: Color { colorScheme == .dark ? Color(red: 0.50, green: 0.79, blue: 0.69) : StudioPalette.green }
 
@@ -53,7 +113,7 @@ struct LibraryScreen: View {
                     Text("生成记录、项目与可恢复回收站").font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
-                Button("刷新", systemImage: "arrow.clockwise") { Task { await reload() } }.buttonStyle(.borderless)
+                Button("刷新", systemImage: "arrow.clockwise") { Task { await reload(resetPagination: false) } }.buttonStyle(.borderless)
             }
             Picker("作品视图", selection: $tab) {
                 Text("全部生成").tag(0); Text("项目").tag(1); Text("回收站").tag(2)
@@ -90,8 +150,8 @@ struct LibraryScreen: View {
         .task {
             await reload()
             await LibraryLiveRefresh().run(shouldRefresh: {
-                tab == 0 && jobs.contains(where: { !$0.job.state.isTerminal })
-            }, refresh: { await reload() })
+                LibraryLiveRefresh.shouldRefresh(tab: tab, loading: loading, visibleRows: rows.items)
+            }, refresh: { await reload(resetPagination: false) })
         }
         .onChange(of: tab) { _, _ in Task { await reload() } }
         .onChange(of: search) { _, _ in Task { await reload() } }
@@ -100,7 +160,7 @@ struct LibraryScreen: View {
         .onChange(of: favoriteOnly) { _, _ in Task { await reload() } }
         .onChange(of: recentDays) { _, _ in Task { await reload() } }
         .onChange(of: archivedOnly) { _, _ in Task { await reload() } }
-        .task(id: selectedJobID) { await inspectSelectedAudio() }
+        .task(id: rows.selectedJobID) { await inspectSelectedAudio() }
         .sheet(isPresented: Binding(get: { result != nil }, set: { if !$0 { result = nil } })) {
             if let result { ResultScreen(controller: result).frame(minWidth: 980, minHeight: 650) }
         }
@@ -110,9 +170,9 @@ struct LibraryScreen: View {
         ScrollView {
             LazyVStack(spacing: 7) {
                 if tab == 0 {
-                    ForEach(jobs, id: \.job.id) { item in
+                    ForEach(rows.items, id: \.job.id) { item in
                         Button {
-                            selectedJobID = item.job.id; name = item.metadata.name; note = item.metadata.note
+                            rows.select(item.job.id)
                         } label: {
                             HStack(spacing: 9) {
                                 Image(systemName: item.metadata.favorite ? "star.fill" : "waveform")
@@ -122,15 +182,18 @@ struct LibraryScreen: View {
                                         .font(.system(size: 13, weight: .semibold)).lineLimit(1)
                                     Text("\(item.project.fields.mode.title) · \(stage(item.job.state)) · 版本 \(item.job.candidateIndex + 1)")
                                         .font(.caption).foregroundStyle(.secondary)
+                                    if rows.pinnedSelectedJobID == item.job.id {
+                                        Text("正在编辑 · 暂留于当前列表").font(.caption2).foregroundStyle(.orange)
+                                    }
                                 }
                                 Spacer()
                                 if item.isFinal { Label("最终", systemImage: "checkmark.seal.fill").font(.caption).foregroundStyle(accent) }
                             }.padding(11).frame(maxWidth: .infinity, alignment: .leading)
-                                .background(selectedJobID == item.job.id ? StudioPalette.green.opacity(0.13) : StudioPalette.background,
+                                .background(rows.selectedJobID == item.job.id ? StudioPalette.green.opacity(0.13) : StudioPalette.background,
                                             in: RoundedRectangle(cornerRadius: 9))
                         }.buttonStyle(.plain).accessibilityIdentifier("library-job-\(item.job.id)")
                     }
-                    if nextBeforeID != nil { Button(loading ? "载入中…" : "显示更多") { Task { await loadMore() } }.disabled(loading).padding(12) }
+                    if rows.nextBeforeID != nil { Button(loading ? "载入中…" : "显示更多") { Task { await loadMore() } }.disabled(loading).padding(12) }
                 } else if tab == 1 {
                     ForEach(projects) { project in
                         Button { selectedProjectID = project.id } label: {
@@ -144,10 +207,10 @@ struct LibraryScreen: View {
                     }
                 } else {
                     ForEach(removed) { job in
-                        Button { selectedJobID = job.id } label: {
+                        Button { selectedRemovedJobID = job.id } label: {
                             HStack { Image(systemName: "trash"); Text("版本 \(job.candidateIndex + 1) · \(stage(job.state))"); Spacer() }
                                 .padding(11).frame(maxWidth: .infinity, alignment: .leading)
-                                .background(selectedJobID == job.id ? StudioPalette.green.opacity(0.13) : StudioPalette.background,
+                                .background(selectedRemovedJobID == job.id ? StudioPalette.green.opacity(0.13) : StudioPalette.background,
                                             in: RoundedRectangle(cornerRadius: 9))
                         }.buttonStyle(.plain)
                     }
@@ -164,8 +227,8 @@ struct LibraryScreen: View {
                 if item.isFinal { Label("最终版本", systemImage: "checkmark.seal.fill").font(.caption).foregroundStyle(accent) }
                 HStack { Label(stage(item.job.state), systemImage: item.job.state == .success ? "checkmark.circle" : "clock")
                     Spacer(); Text("Seed \(item.job.seed)") }.font(.caption).foregroundStyle(.secondary)
-                TextField("版本名称", text: $name).textFieldStyle(.roundedBorder)
-                TextField("备注", text: $note, axis: .vertical).lineLimit(2...3).textFieldStyle(.roundedBorder)
+                TextField("版本名称", text: Binding(get: { rows.name }, set: { rows.editName($0) })).textFieldStyle(.roundedBorder)
+                TextField("备注", text: Binding(get: { rows.note }, set: { rows.editNote($0) }), axis: .vertical).lineLimit(2...3).textFieldStyle(.roundedBorder)
                 HStack {
                     Button("保存名称与备注") { Task { await updateMetadata(item) } }
                     Button(item.metadata.favorite ? "取消收藏" : "收藏", systemImage: item.metadata.favorite ? "star.slash" : "star") {
@@ -234,7 +297,7 @@ struct LibraryScreen: View {
                 Button("继续创作") { onContinue(project) }.buttonStyle(.borderedProminent)
                 Button(archivedOnly ? "恢复项目" : "归档项目") { Task { await archive(project, archived: !archivedOnly) } }.buttonStyle(.borderless)
                 Spacer()
-            } else if tab == 2, let id = selectedJobID, removed.contains(where: { $0.id == id }) {
+            } else if tab == 2, let id = selectedRemovedJobID, removed.contains(where: { $0.id == id }) {
                 Text("可恢复的生成记录").font(StudioTypography.serif(23))
                 Text("恢复时不会覆盖已有同名文件；发生冲突会另存安全名称。")
                     .font(.caption).foregroundStyle(.secondary)
@@ -257,20 +320,40 @@ struct LibraryScreen: View {
         case .failed: "失败"; case .cancelled: "已取消"; case .interrupted: "已中断"
         }
     }
-    private func reload() async {
+    private func reload(resetPagination: Bool = true) async {
         guard let state else { return }
         loading = true; defer { loading = false }
         do {
             switch tab {
             case 0:
-                let page = try await state.store.libraryPage(.init(search: search, mode: mode, state: status, favoriteOnly: favoriteOnly,
-                    since: recentDays == 0 ? nil : Date().addingTimeInterval(-Double(recentDays) * 86400)))
-                jobs = page.items; nextBeforeID = page.nextBeforeID
-                if !jobs.contains(where: { $0.job.id == selectedJobID }) {
-                    selectedJobID = jobs.first(where: { $0.job.state == .success })?.job.id ?? jobs.first?.job.id
+                let querySearch = search, queryMode = mode, queryStatus = status
+                let queryFavorite = favoriteOnly, queryDays = recentDays
+                let since = queryDays == 0 ? nil : Date().addingTimeInterval(-Double(queryDays) * 86400)
+                let requestedPages = resetPagination ? 1 : rows.loadedPages
+                var pages: [LibraryPage] = []
+                var cursor: String?
+                for _ in 0..<requestedPages {
+                    let page = try await state.store.libraryPage(.init(search: querySearch, mode: queryMode, state: queryStatus,
+                        favoriteOnly: queryFavorite, since: since, beforeID: cursor))
+                    pages.append(page)
+                    guard let next = page.nextBeforeID else { break }
+                    cursor = next
                 }
-                if let selected { name = selected.metadata.name; note = selected.metadata.note }
-                await inspectSelectedAudio()
+                guard !Task.isCancelled, tab == 0, search == querySearch, mode == queryMode, status == queryStatus,
+                      favoriteOnly == queryFavorite, recentDays == queryDays else { return }
+                let oldID = rows.selectedJobID, oldState = rows.selected?.job.state
+                var retained: StudioCore.LibraryItem?
+                if !resetPagination, rows.hasUnsavedEdits, let old = rows.selected,
+                   !pages.flatMap(\.items).contains(where: { $0.job.id == old.job.id }) {
+                    let updatedJob = try await state.store.getJob(id: old.job.id)
+                    retained = updatedJob.map { old.updatingJob($0) } ?? old
+                }
+                guard !Task.isCancelled, tab == 0, search == querySearch, mode == queryMode, status == queryStatus,
+                      favoriteOnly == queryFavorite, recentDays == queryDays else { return }
+                rows.apply(pages: pages, reset: resetPagination, retainedSelection: retained)
+                if resetPagination || oldID != rows.selectedJobID || oldState != rows.selected?.job.state {
+                    await inspectSelectedAudio()
+                }
             case 1:
                 let all = try await state.store.listProjects()
                 var active: [ProjectDraft] = []
@@ -279,35 +362,46 @@ struct LibraryScreen: View {
                 if !projects.contains(where: { $0.id == selectedProjectID }) { selectedProjectID = projects.first?.id }
             default:
                 removed = try await state.store.listRemovedJobs()
-                if !removed.contains(where: { $0.id == selectedJobID }) { selectedJobID = removed.first?.id }
+                if !removed.contains(where: { $0.id == selectedRemovedJobID }) { selectedRemovedJobID = removed.first?.id }
             }
-            feedback = nil
+            if resetPagination { feedback = nil }
         } catch { feedback = "作品库读取失败：\(error.localizedDescription)" }
     }
     private func loadMore() async {
-        guard let state, let nextBeforeID, !loading else { return }
+        guard let state, let nextBeforeID = rows.nextBeforeID, !loading else { return }
+        let querySearch = search, queryMode = mode, queryStatus = status
+        let queryFavorite = favoriteOnly, queryDays = recentDays
         loading = true; defer { loading = false }
         do {
-            let page = try await state.store.libraryPage(.init(search: search, mode: mode, state: status,
-                                                               favoriteOnly: favoriteOnly,
-                                                               since: recentDays == 0 ? nil : Date().addingTimeInterval(-Double(recentDays) * 86400),
+            let page = try await state.store.libraryPage(.init(search: querySearch, mode: queryMode, state: queryStatus,
+                                                               favoriteOnly: queryFavorite,
+                                                               since: queryDays == 0 ? nil : Date().addingTimeInterval(-Double(queryDays) * 86400),
                                                                beforeID: nextBeforeID))
-            jobs += page.items; self.nextBeforeID = page.nextBeforeID
+            guard !Task.isCancelled, tab == 0, search == querySearch, mode == queryMode, status == queryStatus,
+                  favoriteOnly == queryFavorite, recentDays == queryDays,
+                  rows.nextBeforeID == nextBeforeID else { return }
+            rows.append(page)
         } catch { feedback = "载入更多记录失败。" }
     }
     private func updateMetadata(_ item: StudioCore.LibraryItem) async {
         guard let state else { return }
-        do { try await state.store.updateJobMetadata(id: item.job.id, name: name, favorite: item.metadata.favorite, note: note); await reload() }
+        do {
+            try await state.store.updateJobMetadata(id: item.job.id, name: rows.name, favorite: item.metadata.favorite, note: rows.note)
+            rows.markSaved(); await reload(resetPagination: false)
+        }
         catch { feedback = "保存版本信息失败。" }
     }
     private func favorite(_ item: StudioCore.LibraryItem) async {
         guard let state else { return }
-        do { try await state.store.updateJobMetadata(id: item.job.id, name: name, favorite: !item.metadata.favorite, note: note); await reload() }
+        do {
+            try await state.store.updateJobMetadata(id: item.job.id, name: rows.name, favorite: !item.metadata.favorite, note: rows.note)
+            rows.markSaved(); await reload(resetPagination: false)
+        }
         catch { feedback = "收藏操作失败。" }
     }
     private func makeFinal(_ item: StudioCore.LibraryItem) async {
         guard let state else { return }
-        do { try await state.store.setFinalJob(batchID: item.job.batchID, jobID: item.job.id); await reload(); feedback = "已设为最终版本。" }
+        do { try await state.store.setFinalJob(batchID: item.job.batchID, jobID: item.job.id); await reload(resetPagination: false); feedback = "已设为最终版本。" }
         catch { feedback = "仅成功生成的同批次版本可设为最终版本。" }
     }
     private func archive(_ project: ProjectDraft, archived: Bool) async {
@@ -345,11 +439,11 @@ struct LibraryScreen: View {
         do {
             let asset = try await audioAsset(selected.job.id)
             _ = try await state.assets.decodeRegisteredAudio(asset.id)
-            guard selectedJobID == selected.job.id else { return }
+            guard rows.selectedJobID == selected.job.id else { return }
             selectedAudioAsset = asset
             audioReady = true
         } catch {
-            if selectedJobID == selected.job.id {
+            if rows.selectedJobID == selected.job.id {
                 selectedAudioAsset = try? await audioAsset(selected.job.id)
                 audioReady = false
             }
@@ -358,7 +452,7 @@ struct LibraryScreen: View {
     private func resumeDownload(_ id: String) async {
         guard let state, !retryingDownload else { return }
         retryingDownload = true; defer { retryingDownload = false }
-        do { try await state.generation.resumeDownload(jobID: id); await reload() }
+        do { try await state.generation.resumeDownload(jobID: id); await reload(resetPagination: false) }
         catch { feedback = "已记录的下载无法继续；请检查链接有效期与输出目录授权。不会重新提交模型请求。" }
     }
     private func showResult(_ batchID: String) async {
@@ -403,7 +497,7 @@ struct LibraryScreen: View {
             guard let batch = try await state.store.getBatch(id: item.job.batchID) else { throw StudioStoreError.missing }
             let report = ["model": "qwen-audio-3.1-tts-next", "project": item.project.fields.name,
                           "job_id": item.job.id, "state": item.job.state.rawValue,
-                          "prompt": batch.submission.compiledPrompt, "note": note]
+                          "prompt": batch.submission.compiledPrompt, "note": rows.note]
             let bytes = try JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys])
             let panel = NSSavePanel(); panel.nameFieldStringValue = "qwen-result-\(item.job.candidateIndex + 1).json"
             guard await panel.begin() == .OK, let url = panel.url else { return }

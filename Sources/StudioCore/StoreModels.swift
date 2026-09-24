@@ -110,6 +110,9 @@ public struct LibraryItem: Sendable {
     public let metadata: JobMetadata
     public let createdAt: Date
     public let isFinal: Bool
+    public func updatingJob(_ replacement: StoredJob) -> LibraryItem {
+        LibraryItem(job: replacement, project: project, metadata: metadata, createdAt: createdAt, isFinal: isFinal)
+    }
 }
 
 public struct LibraryPage: Sendable {
