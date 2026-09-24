@@ -8,6 +8,9 @@ struct QwenAudioStudioMacApp: App {
     @State private var preferences: StudioPreferences
     @State private var outputFolders: OutputFolderController
     init() {
+        if let argument = ProcessInfo.processInfo.arguments.first(where: { $0.hasPrefix("--verify-reference-memory-root=") }) {
+            NativeReferenceMemoryQA.run(root: URL(fileURLWithPath: String(argument.dropFirst("--verify-reference-memory-root=".count)), isDirectory: true))
+        }
         if let argument = ProcessInfo.processInfo.arguments.first(where: { $0.hasPrefix("--verify-reference-audio-root=") }) {
             NativeReferenceAudioQA.run(root: URL(fileURLWithPath: String(argument.dropFirst("--verify-reference-audio-root=".count)), isDirectory: true))
         }

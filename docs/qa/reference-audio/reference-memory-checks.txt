@@ -1,0 +1,1 @@
+source=600.000s; tail=594...600s; tailDuration=6.000s; tailHz=880.0; peakRSSBytes=10977280; limitBytes=167772160

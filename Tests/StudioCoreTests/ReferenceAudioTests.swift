@@ -4,6 +4,63 @@ import AVFoundation
 @testable import StudioCore
 
 struct ReferenceAudioTests {
+    @Test func unexpectedRemovalFailureKeepsJournalEvenWhenExistenceCheckWouldBeFalse() async throws {
+        let (root, store, original) = try fixture(); defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("synthetic.wav"); try wav(source, seconds: 1)
+        let imported = try await original.importSource(url: source)
+        let clip = try await original.prepare(importID: imported.id, start: 0, end: 1, persistent: false, name: "temporary")
+        let service = try ReferenceAudioService(root: root.appendingPathComponent("audio"), store: store, fileRemover: DeleteThenReportFailure())
+        await #expect(throws: CocoaError.self) { try await service.cleanup(now: Date().addingTimeInterval(7200)) }
+        #expect(try await store.pendingReferenceCleanup().map(\.id) == [clip.snapshot.id])
+        #expect(try await original.cleanup() == [clip.snapshot.id])
+    }
+    @Test func cleanupFinishesJournalAfterFileWasRemovedBeforeRestart() async throws {
+        let (root, store, service) = try fixture(); defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("synthetic.wav"); try wav(source, seconds: 1)
+        let imported = try await service.importSource(url: source)
+        let clip = try await service.prepare(importID: imported.id, start: 0, end: 1, persistent: false, name: "temporary")
+        #expect(try await store.removeUnleasedTemporaryReference(clip.snapshot.id, idleBefore: Date().addingTimeInterval(7200)))
+        try FileManager.default.removeItem(at: root.appendingPathComponent("audio").appendingPathComponent(clip.snapshot.relativePath))
+        try await store.close()
+        let reopened = try StudioStore(dataRoot: root.appendingPathComponent("db"))
+        let retry = try ReferenceAudioService(root: root.appendingPathComponent("audio"), store: reopened)
+        #expect(try await retry.cleanup() == [clip.snapshot.id])
+        #expect(try await reopened.pendingReferenceCleanup().isEmpty)
+    }
+    @Test func failedCleanupRemainsRecoverableAndRetriesWithoutTouchingLeasedClip() async throws {
+        let (root, store, sourceService) = try fixture(); defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("synthetic.wav"); try wav(source, seconds: 1)
+        let imported = try await sourceService.importSource(url: source)
+        let clip = try await sourceService.prepare(importID: imported.id, start: 0, end: 1, persistent: false, name: "temporary")
+        let file = root.appendingPathComponent("audio").appendingPathComponent(clip.snapshot.relativePath)
+        let remover = FailFirstReferenceDeletion()
+        let service = try ReferenceAudioService(root: root.appendingPathComponent("audio"), store: store, fileRemover: remover)
+        let directory = DirectorySnapshot(id: "directory", version: 1, bookmark: Data([1]))
+        try await store.saveDirectory(directory)
+        let fields = DraftFields(prompt: "@voice1 synthetic", referenceBindings: [.init(referenceID: clip.snapshot.id, alias: "合成", slot: 1)], outputDirectoryID: directory.id)
+        let project = try await store.createProject(fields: fields)
+        let compiled = try PromptCompiler.compile(mode: fields.mode, prompt: fields.prompt, bindings: fields.referenceBindings)
+        let request = UUID().uuidString
+        let batch = try await store.createBatch(.init(clientRequestID: request, project: project, compiledPrompt: compiled.text,
+            candidateSeeds: [1], directory: directory, references: [clip.snapshot],
+            consent: .init(clientRequestID: request, references: [clip.snapshot], confirmed: true)))
+        #expect(try await service.cleanup(now: Date().addingTimeInterval(7200)).isEmpty)
+        #expect(FileManager.default.fileExists(atPath: file.path))
+        #expect(try await store.getReference(id: clip.snapshot.id) == clip.snapshot)
+        _ = try await store.cancelQueued(id: batch.jobIDs[0])
+        await #expect(throws: CocoaError.self) { try await service.cleanup(now: Date().addingTimeInterval(7200)) }
+        #expect(FileManager.default.fileExists(atPath: file.path))
+        #expect(try await store.pendingReferenceCleanup().map(\.id) == [clip.snapshot.id])
+        await #expect(throws: StudioStoreError.staleReference) { try await store.saveReference(clip.snapshot) }
+        // A reopened database/service must discover the failed deletion durably.
+        try await store.close()
+        let reopened = try StudioStore(dataRoot: root.appendingPathComponent("db"))
+        let retry = try ReferenceAudioService(root: root.appendingPathComponent("audio"), store: reopened)
+        _ = try await retry.cleanup(now: Date().addingTimeInterval(7200))
+        #expect(!FileManager.default.fileExists(atPath: file.path))
+        #expect(try await reopened.getReference(id: clip.snapshot.id) == nil)
+        #expect(try await reopened.pendingReferenceCleanup().isEmpty)
+    }
     func fixture() throws -> (URL, StudioStore, ReferenceAudioService) {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
@@ -129,5 +186,21 @@ struct ReferenceAudioTests {
         let file = root.appendingPathComponent("audio").appendingPathComponent(clip.snapshot.relativePath)
         try Data([1,2,3]).write(to: file)
         await #expect(throws: ReferenceAudioError.unavailable) { try await reopened.prepared(referenceID: clip.snapshot.id) }
+    }
+}
+
+private final class FailFirstReferenceDeletion: ReferenceFileRemoving, @unchecked Sendable {
+    private let lock = NSLock()
+    private var failed = false
+    func remove(_ url: URL) throws {
+        lock.lock(); let shouldFail = !failed; failed = true; lock.unlock()
+        if shouldFail { throw CocoaError(.fileWriteNoPermission) }
+        try FileManager.default.removeItem(at: url)
+    }
+}
+private struct DeleteThenReportFailure: ReferenceFileRemoving {
+    func remove(_ url: URL) throws {
+        try FileManager.default.removeItem(at: url)
+        throw CocoaError(.fileWriteNoPermission)
     }
 }

@@ -31,15 +31,18 @@ import StudioCore
 
 @MainActor @Observable final class VoiceSheetController {
     let service: ReferenceAudioService
-    var imported: ImportedReference?
-    var start = 0.0
-    var end = 0.0
+    var imported: ImportedReference? { didSet { if oldValue?.id != imported?.id { selectionChanged() } } }
+    var start = 0.0 { didSet { if oldValue != start { selectionChanged() } } }
+    var end = 0.0 { didSet { if oldValue != end { selectionChanged() } } }
     var name = ""
     var persistent = false
     var busy = false
     var message: String?
     var quality: AudioSignalQuality?
     var library: [ReferenceSnapshot] = []
+    private var warnedSelection: String?
+    var selectionKey: String { "\(imported?.id ?? ""):\(start):\(end)" }
+    var requiresQualityAcknowledgement: Bool { warnedSelection == selectionKey }
     init(service: ReferenceAudioService) { self.service = service }
     var selectionValid: Bool {
         guard let imported else { return false }
@@ -84,10 +87,36 @@ import StudioCore
             message = nil
         } catch { message = Self.explain(error) }
     }
-    func prepare() async -> PreparedReference? {
-        guard selectionValid, let imported else { return nil }
+    private func selectionChanged() {
+        quality = nil; warnedSelection = nil; message = nil
+        ReferencePlayback.shared.stop()
+    }
+    func analyzeSelection() async {
+        guard selectionValid, let imported else { quality = nil; return }
+        let key = selectionKey, start = start, end = end
+        do {
+            let preview = try await service.preview(importID: imported.id, start: start, end: end)
+            guard key == selectionKey, !Task.isCancelled else { return }
+            quality = preview.quality
+        } catch { if key == selectionKey { message = Self.explain(error) } }
+    }
+    func prepare(allowQualityWarnings: Bool = false) async -> PreparedReference? {
+        guard selectionValid, let imported, !busy else { return nil }
+        let key = selectionKey, start = start, end = end, name = name, persistent = persistent
         busy = true; defer { busy = false }
-        do { return try await service.prepare(importID: imported.id, start: start, end: end, persistent: persistent, name: name) }
+        do {
+            let preview = try await service.preview(importID: imported.id, start: start, end: end)
+            guard key == selectionKey else { return nil }
+            quality = preview.quality
+            let needsWarning = preview.quality.hints.contains(.silence) || preview.quality.hints.contains(.clipping)
+            if needsWarning && !(allowQualityWarnings && warnedSelection == key) {
+                warnedSelection = key
+                message = "当前选区检测到\(preview.quality.hints.contains(.silence) ? "静音" : "疑似削波失真")。可重新选择，或点击“仍然使用此片段”。"
+                return nil
+            }
+            message = nil
+            return try await service.prepare(importID: imported.id, start: start, end: end, persistent: persistent, name: name)
+        }
         catch { message = Self.explain(error); return nil }
     }
     static func explain(_ error: Error) -> String {
@@ -199,23 +228,26 @@ struct VoiceSheet: View {
                     Spacer(minLength: 0)
                 }.frame(maxWidth: .infinity, alignment: .leading)
             }
-            if let message = controller.message { Text(message).font(.caption).foregroundStyle(.red) }
+            if let message = controller.message { Text(message).font(.caption).foregroundStyle(controller.requiresQualityAcknowledgement ? Color.orange : .red) }
             HStack {
                 Text(slot.map { "新片段将绑定 @voice\($0)" } ?? "暂无空闲槽位，请先处理脚本中已有的 @voice1–3。")
                     .font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 if controller.busy { ProgressView().controlSize(.small) }
-                Button(controller.persistent ? "保存并使用片段" : "暂存并使用片段") { Task {
-                    if let prepared = await controller.prepare() { bind(prepared) }
+                Button(controller.requiresQualityAcknowledgement ? "仍然使用此片段" : (controller.persistent ? "保存并使用片段" : "暂存并使用片段")) { Task {
+                    if let prepared = await controller.prepare(allowQualityWarnings: controller.requiresQualityAcknowledgement) { bind(prepared) }
                 } }.buttonStyle(.borderedProminent).tint(StudioPalette.green)
                     .disabled(!controller.selectionValid || controller.busy || slot == nil)
             }
         }
         .padding(24).frame(width: 850, height: 600).background(StudioPalette.surface)
         .task { await controller.loadLibrary() }
+        .task(id: controller.selectionKey) {
+            try? await Task.sleep(for: .milliseconds(150))
+            guard !Task.isCancelled else { return }
+            await controller.analyzeSelection()
+        }
         .onDisappear { ReferencePlayback.shared.stop() }
-        .onChange(of: controller.start) { ReferencePlayback.shared.stop(); controller.quality = nil }
-        .onChange(of: controller.end) { ReferencePlayback.shared.stop(); controller.quality = nil }
     }
     private var playbackTitle: String {
         switch ReferencePlayback.shared.state { case .stopped: ""; case .source: "正在试听源音频"; case .selection: "正在试听选区"; case .library: "正在试听本地音色" }

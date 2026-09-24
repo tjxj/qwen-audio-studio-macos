@@ -13,12 +13,15 @@ network service, or a codec installation. The three upstream copyright/license
 files under `Licenses` are copied into the signed app's Resources directory.
 libogg and opus use BSD-style licenses; opusfile uses a BSD-style license.
 
-`COpusBridge` reads local bytes through opusfile's memory API. Swift keeps the
-Data buffer pinned for the complete open/read/close lifetime. Stereo output is
-mixed to mono and resampled by AVAudioConverter to 24 kHz before PCM16 encoding.
+`COpusBridge` uses opusfile's local-file API and streams bounded stereo chunks.
+AVAudioConverter mixes/resamples into fixed output buffers and a streaming writer
+emits 24 kHz mono PCM16 WAV. No full-source float array is retained.
 The reference-file pipeline rejects malformed streams and chained Ogg links.
 
 Synthetic test fixtures can be regenerated with
 `bash scripts/make-reference-fixtures.sh`. This development-only script uses
 ffmpeg to encode 440 Hz tones; it is never called by the app. The 40-second
-Opus fixture checks that conversion retains the tail of a long source.
+Opus fixture checks that conversion retains the tail of a long source. A second
+600-second fixture drives `scripts/verify-reference-memory.sh`, which measures
+the standalone app process's peak RSS (including frameworks) against 160 MiB and
+checks its final six seconds. Only synthetic tones are used.

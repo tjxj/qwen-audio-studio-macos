@@ -4,6 +4,7 @@
 #include <stdint.h>
 typedef struct QwenOpus QwenOpus;
 QwenOpus *qwen_opus_open(const unsigned char *data, size_t size, int64_t *frames, int *channels);
+QwenOpus *qwen_opus_open_file(const char *path, int64_t *frames, int *channels);
 int qwen_opus_seek(QwenOpus *decoder, int64_t frame);
 /* capacity counts float elements; return value counts stereo frames. */
 int qwen_opus_read(QwenOpus *decoder, float *interleaved_stereo, int capacity);

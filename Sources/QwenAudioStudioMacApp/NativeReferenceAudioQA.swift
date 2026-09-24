@@ -97,6 +97,20 @@ import StudioCore
                     if let view = window.contentView?.superview { try capture(view, to: canonical.appendingPathComponent("voice-\(name)-1280-window.png")) }
                     checks.append("\(name): window=\(Int(window.frame.width))x\(Int(window.frame.height)); sheet=\(Int(sheet.frame.width))x\(Int(sheet.frame.height)); insideWindow=\(window.frame.contains(sheet.frame)); scale=2")
                 }
+                let silenceURL = canonical.appendingPathComponent("合成静音提示.wav")
+                let silence = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 24000)!
+                silence.frameLength = 24000
+                for i in 0..<24000 { silence.floatChannelData![0][i] = 0 }
+                do { let file = try AVAudioFile(forWriting: silenceURL, settings: format.settings); try file.write(from: silence) }
+                await controller.importURL(silenceURL)
+                guard await controller.prepare() == nil, controller.quality?.hints.contains(.silence) == true,
+                      controller.requiresQualityAcknowledgement else { exit(1) }
+                app.appearance = NSAppearance(named: .aqua); sheet.appearance = NSAppearance(named: .aqua)
+                try await Task.sleep(for: .milliseconds(300))
+                sheetView.layoutSubtreeIfNeeded()
+                try capture(sheetView, to: canonical.appendingPathComponent("voice-warning-1280-sheet.png"))
+                guard await controller.prepare(allowQualityWarnings: true) != nil else { exit(1) }
+                checks.append("quality=selection analyzed without preview; silence warns before saving; explicit continue succeeds")
                 try checks.joined(separator: "\n").write(to: canonical.appendingPathComponent("reference-audio-checks.txt"), atomically: true, encoding: .utf8)
                 ReferencePlayback.shared.stop()
                 try await store.close()

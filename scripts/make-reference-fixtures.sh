@@ -11,3 +11,8 @@ for ext in wav mp3 m4a ogg; do
 done
 ffmpeg -hide_banner -loglevel error -y -f lavfi -i 'sine=frequency=440:sample_rate=48000:duration=40' \
     -ac 2 -c:a libopus Tests/StudioCoreTests/Fixtures/ReferenceAudio/long-tone.ogg
+ffmpeg -hide_banner -loglevel error -y \
+    -f lavfi -i 'sine=frequency=220:sample_rate=48000:duration=594' \
+    -f lavfi -i 'sine=frequency=880:sample_rate=48000:duration=6' \
+    -filter_complex '[0:a][1:a]concat=n=2:v=0:a=1[out]' -map '[out]' \
+    -ac 2 -c:a libopus -b:a 12k Tests/StudioCoreTests/Fixtures/ReferenceAudio/ten-minute-tone.ogg

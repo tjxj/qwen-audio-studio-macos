@@ -123,6 +123,7 @@ public actor StudioStore {
         guard !reference.id.isEmpty, !reference.contentHash.isEmpty, reference.duration.isFinite,
               reference.duration > 0, reference.duration <= 30 else { throw StudioStoreError.staleReference }
         try db.transaction {
+            guard try db.rows("SELECT reference_id FROM reference_cleanup WHERE reference_id=?", [.text(reference.id)]).isEmpty else { throw StudioStoreError.staleReference }
             if try activeLeaseCount(referenceID: reference.id) > 0, try getReference(id: reference.id) != reference {
                 throw StudioStoreError.staleReference
             }
@@ -170,9 +171,17 @@ public actor StudioStore {
                   try activeLeaseCount(referenceID: id) == 0 else { return false }
             let used = try db.rows("SELECT last_used_ms FROM reference_voices WHERE id=?", [.text(id)]).first?.first?.int ?? Int.max
             guard used <= Int(idleBefore.timeIntervalSince1970 * 1000) else { return false }
+            // Durable tombstone remains after failed/uncompleted filesystem work.
+            try db.execute("INSERT INTO reference_cleanup(reference_id,snapshot) VALUES(?,?)", [.text(id), .blob(try storeEncode(reference))])
             try db.execute("DELETE FROM upload_consents WHERE reference_id=?", [.text(id)])
             return try db.execute("DELETE FROM reference_voices WHERE id=?", [.text(id)]) == 1
         }
+    }
+    public func pendingReferenceCleanup() throws -> [ReferenceSnapshot] {
+        try db.rows("SELECT snapshot FROM reference_cleanup ORDER BY rowid").map { try storeDecode(ReferenceSnapshot.self, $0[0]) }
+    }
+    public func finishReferenceCleanup(_ id: String) throws {
+        try db.execute("DELETE FROM reference_cleanup WHERE reference_id=?", [.text(id)])
     }
 
     /// Returns only after a FULL-synchronous COMMIT. A caller may then claim a queued

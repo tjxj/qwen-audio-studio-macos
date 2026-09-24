@@ -22,11 +22,12 @@ public struct ReferencePreview: Sendable {
 public actor ReferenceAudioService {
     private let root: URL
     private let store: StudioStore
+    private let fileRemover: any ReferenceFileRemoving
     private var imports: [String: ImportedReference] = [:]
     private let rate = 24000.0
-    public init(root: URL, store: StudioStore) throws {
+    public init(root: URL, store: StudioStore, fileRemover: any ReferenceFileRemoving = LocalReferenceFileRemover()) throws {
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        self.root = root; self.store = store
+        self.root = root; self.store = store; self.fileRemover = fileRemover
     }
     public func importSource(url: URL) throws -> ImportedReference {
         let scoped = url.startAccessingSecurityScopedResource()
@@ -36,21 +37,39 @@ public actor ReferenceAudioService {
         guard values.isRegularFile == true else { throw ReferenceAudioError.unavailable }
         guard (values.fileSize ?? Int.max) <= limit else { throw ReferenceAudioError.sourceTooLarge }
         let handle = try FileHandle(forReadingFrom: url); defer { try? handle.close() }
-        let data = try handle.read(upToCount: limit + 1) ?? Data()
-        guard data.count <= limit else { throw ReferenceAudioError.sourceTooLarge }
         let ext = url.pathExtension.lowercased()
-        try Self.validateContainer(data, ext: ext)
+        try Self.validateContainer(try handle.read(upToCount: 512) ?? Data(), ext: ext)
+        try handle.seek(toOffset: 0)
         let id = UUID().uuidString
         let copy = root.appendingPathComponent("decode_\(id).\(ext)")
-        try data.write(to: copy, options: .withoutOverwriting)
         defer { try? FileManager.default.removeItem(at: copy) }
-        let decoded = ext == "ogg" ? try decodeOpus(data) : try decodeNative(copy)
-        let duration = Double(decoded.samples.count) / rate
+        try Data().write(to: copy, options: .withoutOverwriting)
+        let destination = try FileHandle(forWritingTo: copy)
+        defer { try? destination.close() }
+        var copied = 0
+        while true {
+            let count: Int = try autoreleasepool {
+                guard let chunk = try handle.read(upToCount: 64 * 1024), !chunk.isEmpty else { return 0 }
+                copied += chunk.count
+                guard copied <= limit else { throw ReferenceAudioError.sourceTooLarge }
+                try destination.write(contentsOf: chunk)
+                return chunk.count
+            }
+            if count == 0 { break }
+        }
+        try destination.close()
+        let outputURL = importURL(id)
+        var completed = false
+        defer { if !completed { try? FileManager.default.removeItem(at: outputURL) } }
+        let writer = try StreamingReferenceWAV(url: outputURL, rate: Int(rate))
+        let decoded = ext == "ogg" ? try decodeOpus(copy, writer: writer) : try decodeNative(copy, writer: writer)
+        try writer.finish()
+        let duration = Double(writer.frameCount) / rate
         guard duration > 0, duration <= 600 else { throw ReferenceAudioError.sourceTooLong }
         let imported = ImportedReference(id: id, fileName: url.lastPathComponent, duration: duration,
-            sampleRate: decoded.rate, channels: decoded.channels, quality: AudioSignalMeter.measure(decoded.samples))
-        try Self.wav(decoded.samples, rate: Int(rate)).write(to: importURL(id), options: .withoutOverwriting)
+            sampleRate: decoded.rate, channels: decoded.channels, quality: writer.quality)
         imports[id] = imported
+        completed = true
         return imported
     }
     public func prepare(importID: String, start: Double, end: Double, persistent: Bool, name: String) async throws -> PreparedReference {
@@ -95,11 +114,22 @@ public actor ReferenceAudioService {
         let cutoff = now.addingTimeInterval(-3600)
         var removed: [String] = []
         for reference in try await store.listReferences() where reference.temporary {
+            _ = try clipURL(reference)
+            _ = try await store.removeUnleasedTemporaryReference(reference.id, idleBefore: cutoff)
+        }
+        // A failed deletion remains registered here, even across process restart.
+        // A claimed reference is no longer available for new batch leases.
+        for reference in try await store.pendingReferenceCleanup() {
             let url = try clipURL(reference)
-            if try await store.removeUnleasedTemporaryReference(reference.id, idleBefore: cutoff) {
-                if FileManager.default.fileExists(atPath: url.path) { try FileManager.default.removeItem(at: url) }
-                removed.append(reference.id)
+            do { try fileRemover.remove(url) }
+            catch {
+                let failure = error as NSError
+                let missing = failure.domain == NSCocoaErrorDomain &&
+                    [CocoaError.Code.fileNoSuchFile.rawValue, CocoaError.Code.fileReadNoSuchFile.rawValue].contains(failure.code)
+                guard missing || (failure.domain == NSPOSIXErrorDomain && failure.code == Int(POSIXErrorCode.ENOENT.rawValue)) else { throw error }
             }
+            try await store.finishReferenceCleanup(reference.id)
+            removed.append(reference.id)
         }
         for url in try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: [.contentModificationDateKey]) {
             let name = url.deletingPathExtension().lastPathComponent
@@ -130,72 +160,71 @@ public actor ReferenceAudioService {
         try FileManager.default.setAttributes([.modificationDate: Date()], ofItemAtPath: importURL(id).path)
         return Array(UnsafeBufferPointer(start: samples[0], count: Int(buffer.frameLength)))
     }
-    private struct Decoded { let samples: [Float]; let rate: Double; let channels: Int }
-    private func decodeNative(_ url: URL) throws -> Decoded {
+    private struct Decoded { let rate: Double; let channels: Int }
+    private func decodeNative(_ url: URL, writer: StreamingReferenceWAV) throws -> Decoded {
         let file = try AVAudioFile(forReading: url)
         let source = file.processingFormat
         guard source.sampleRate > 0, source.channelCount > 0, source.channelCount <= 32 else { throw ReferenceAudioError.decodeFailed }
         guard Double(file.length) / source.sampleRate <= 600 else { throw ReferenceAudioError.sourceTooLong }
-        let destination = AVAudioFormat(standardFormatWithSampleRate: rate, channels: 1)!
-        guard let converter = AVAudioConverter(from: source, to: destination),
-              let output = AVAudioPCMBuffer(pcmFormat: destination, frameCapacity: 8192) else { throw ReferenceAudioError.decodeFailed }
-        var samples: [Float] = [], readError: Error?
-        while true {
-            var conversionError: NSError?
-            let status = converter.convert(to: output, error: &conversionError) { requested, state in
-                guard file.framePosition < file.length else { state.pointee = .endOfStream; return nil }
-                guard let input = AVAudioPCMBuffer(pcmFormat: source, frameCapacity: requested) else {
-                    state.pointee = .endOfStream; return nil
-                }
-                do {
-                    try file.read(into: input, frameCount: requested)
-                    state.pointee = input.frameLength == 0 ? .endOfStream : .haveData
-                    return input
-                } catch { readError = error; state.pointee = .endOfStream; return nil }
-            }
-            if readError != nil || conversionError != nil || status == .error { throw ReferenceAudioError.decodeFailed }
-            if let channel = output.floatChannelData {
-                samples.append(contentsOf: UnsafeBufferPointer(start: channel[0], count: Int(output.frameLength)))
-            }
-            guard samples.count <= Int(rate * 600) else { throw ReferenceAudioError.sourceTooLong }
-            if status == .endOfStream { break }
-            guard output.frameLength > 0 else { throw ReferenceAudioError.decodeFailed }
+        try convert(source: source, writer: writer) { requested in
+            guard file.framePosition < file.length else { return nil }
+            guard let input = AVAudioPCMBuffer(pcmFormat: source, frameCapacity: requested) else { throw ReferenceAudioError.decodeFailed }
+            try file.read(into: input, frameCount: requested)
+            return input.frameLength == 0 ? nil : input
         }
-        guard samples.allSatisfy(\.isFinite) else { throw ReferenceAudioError.decodeFailed }
-        return Decoded(samples: samples, rate: source.sampleRate, channels: Int(source.channelCount))
+        return Decoded(rate: source.sampleRate, channels: Int(source.channelCount))
     }
-    private func decodeOpus(_ data: Data) throws -> Decoded {
-        try data.withUnsafeBytes { bytes in
+    private func decodeOpus(_ url: URL, writer: StreamingReferenceWAV) throws -> Decoded {
             var total: Int64 = 0, channels: Int32 = 0
-            guard let decoder = qwen_opus_open(bytes.bindMemory(to: UInt8.self).baseAddress, data.count, &total, &channels) else { throw ReferenceAudioError.decodeFailed }
+            guard let decoder = url.path.withCString({ qwen_opus_open_file($0, &total, &channels) }) else { throw ReferenceAudioError.decodeFailed }
             defer { qwen_opus_close(decoder) }
             guard total > 0, total <= 48000 * 600 else { throw ReferenceAudioError.sourceTooLong }
             guard qwen_opus_seek(decoder, 0) == 0 else { throw ReferenceAudioError.decodeFailed }
-            var stereo = [Float](repeating: 0, count: 8192), mono: [Float] = []
+            var stereo = [Float](repeating: 0, count: 8192 * 2)
             var readFrames: Int64 = 0
-            while true {
-                let count = qwen_opus_read(decoder, &stereo, Int32(stereo.count))
+            let format = AVAudioFormat(standardFormatWithSampleRate: 48000, channels: 1)!
+            try convert(source: format, writer: writer) { requested in
+                let count = qwen_opus_read(decoder, &stereo, Int32(requested * 2))
                 guard count >= 0 else { throw ReferenceAudioError.decodeFailed }
-                if count == 0 { break }
-                for i in 0..<Int(count) { mono.append((stereo[i * 2] + stereo[i * 2 + 1]) / 2) }
+                if count == 0 { return nil }
+                let input = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: UInt32(count))!
+                input.frameLength = UInt32(count)
+                for i in 0..<Int(count) {
+                    let sample = (stereo[i * 2] + stereo[i * 2 + 1]) / 2
+                    guard sample.isFinite else { throw ReferenceAudioError.decodeFailed }
+                    input.floatChannelData![0][i] = sample
+                }
                 readFrames += Int64(count)
                 guard readFrames <= total else { throw ReferenceAudioError.decodeFailed }
+                return input
             }
-            guard readFrames == total, mono.allSatisfy(\.isFinite) else { throw ReferenceAudioError.decodeFailed }
-            let inputFormat = AVAudioFormat(standardFormatWithSampleRate: 48000, channels: 1)!
-            let outputFormat = AVAudioFormat(standardFormatWithSampleRate: rate, channels: 1)!
-            let input = AVAudioPCMBuffer(pcmFormat: inputFormat, frameCapacity: UInt32(mono.count))!
-            input.frameLength = UInt32(mono.count)
-            mono.withUnsafeBufferPointer { input.floatChannelData![0].update(from: $0.baseAddress!, count: mono.count) }
-            let output = AVAudioPCMBuffer(pcmFormat: outputFormat, frameCapacity: UInt32(ceil(Double(mono.count) / 2)) + 1024)!
-            let converter = AVAudioConverter(from: inputFormat, to: outputFormat)!
-            var fed = false, error: NSError?
-            let status = converter.convert(to: output, error: &error) { _, state in
-                if fed { state.pointee = .endOfStream; return nil }
-                fed = true; state.pointee = .haveData; return input
+            guard readFrames == total else { throw ReferenceAudioError.decodeFailed }
+            return Decoded(rate: 48000, channels: Int(channels))
+    }
+    private func convert(source: AVAudioFormat, writer: StreamingReferenceWAV,
+                         read: @escaping (AVAudioFrameCount) throws -> AVAudioPCMBuffer?) throws {
+        let destination = AVAudioFormat(standardFormatWithSampleRate: rate, channels: 1)!
+        guard let converter = AVAudioConverter(from: source, to: destination),
+              let output = AVAudioPCMBuffer(pcmFormat: destination, frameCapacity: 8192) else { throw ReferenceAudioError.decodeFailed }
+        var readError: Error?, emptyPasses = 0
+        while true {
+            let status: AVAudioConverterOutputStatus = try autoreleasepool {
+                var conversionError: NSError?
+                let result = converter.convert(to: output, error: &conversionError) { requested, state in
+                    do {
+                        guard let input = try read(min(requested, 8192)) else { state.pointee = .endOfStream; return nil }
+                        state.pointee = .haveData; return input
+                    } catch { readError = error; state.pointee = .endOfStream; return nil }
+                }
+                if let readError { throw readError }
+                guard conversionError == nil, result != .error else { throw ReferenceAudioError.decodeFailed }
+                if output.frameLength > 0 { try writer.append(output) }
+                return result
             }
-            guard error == nil, status != .error, output.frameLength > 0 else { throw ReferenceAudioError.decodeFailed }
-            return Decoded(samples: Array(UnsafeBufferPointer(start: output.floatChannelData![0], count: Int(output.frameLength))), rate: 48000, channels: Int(channels))
+            if output.frameLength > 0 { emptyPasses = 0 }
+            else { emptyPasses += 1 }
+            if status == .endOfStream { break }
+            guard emptyPasses < 16 else { throw ReferenceAudioError.decodeFailed }
         }
     }
     private static func validateContainer(_ data: Data, ext: String) throws {
