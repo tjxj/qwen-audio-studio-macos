@@ -62,9 +62,9 @@
 
 **Interfaces:** `PromptCompiler.compile(mode:prompt:bindings:) throws -> CompiledPrompt`; `TemplateEngine.preview(templateID:values:) throws -> TemplatePreview`.
 
-- [ ] Copy the existing public 42-template dataset, preserving all IDs. Add tests that each mode has six items, defaults expand without unresolved variables, unknown/overlong values fail, and applying a template then Undo restores previous text.
-- [ ] Add compiler tests for 3000 Unicode scalars, seven mode mappings, a missing `@voiceN`, and changed binding order. Run tests red.
-- [ ] Implement pure Swift expansion and prompt compilation. Present variable form and full preview in a native sheet; built-ins stay read-only, custom templates support create/edit/remove/favorite. Run green and commit.
+- [x] Copy the existing public 42-template dataset, preserving all IDs. Add tests that each mode has six items, defaults expand without unresolved variables, unknown/overlong values fail, and applying a template then Undo restores previous text.
+- [x] Add compiler tests for 3000 Unicode scalars, seven mode mappings, a missing `@voiceN`, and changed binding order. Run tests red.
+- [x] Implement pure Swift expansion and prompt compilation. Present variable form and full preview in a native sheet; built-ins stay read-only, custom templates support create/edit/remove/favorite. Run green and commit.
 
 ### Task 4: SQLite store, migration schema and ownership
 
