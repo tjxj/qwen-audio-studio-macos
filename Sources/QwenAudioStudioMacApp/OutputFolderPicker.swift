@@ -82,6 +82,17 @@ final class OutputFolderController {
             defaultID = id; defaultName = try await name(for: id)
         } catch { errorMessage = Self.message(error) }
     }
+    func reauthorize(_ id: String) async -> Bool {
+        guard let directories, !isChoosing else { return false }
+        isChoosing = true; defer { isChoosing = false }
+        guard let selected = await picker.chooseDirectory() else { return false }
+        do {
+            try await directories.reauthorize(directoryID: id, selectedURL: selected)
+            if defaultID == id { defaultName = try await name(for: id) }
+            errorMessage = nil
+            return true
+        } catch { errorMessage = Self.message(error); return false }
+    }
     func revealDirectory(_ id: String) async {
         guard let directories else { return }
         do {
@@ -96,7 +107,8 @@ final class OutputFolderController {
         } catch { errorMessage = Self.message(error) }
     }
     private static func message(_ error: Error) -> String {
-        if error as? OutputDirectoryError == .reauthorizationRequired { return "文件夹授权已失效，请重新选择输出文件夹。" }
+        if error as? OutputDirectoryError == .reauthorizationRequired { return "文件夹授权已失效，请使用“重新授权”选择原输出文件夹。" }
+        if error as? OutputDirectoryError == .directoryMismatch { return "无法确认所选文件夹为原输出目录，原授权记录保持不变。" }
         return "无法访问输出文件夹。请检查磁盘连接与写入权限，或重新选择。"
     }
 }

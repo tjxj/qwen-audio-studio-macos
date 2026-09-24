@@ -25,6 +25,8 @@ struct SettingsScreen: View {
                     Button("选择…") { Task { await outputFolders.chooseDefault() } }
                         .disabled(outputFolders.directories == nil || outputFolders.isChoosing)
                     if let id = outputFolders.defaultID {
+                        Button("重新授权…") { Task { _ = await outputFolders.reauthorize(id) } }
+                            .disabled(outputFolders.isChoosing)
                         Button("在 Finder 显示") { Task { await outputFolders.revealDirectory(id) } }
                     }
                 }

@@ -3,6 +3,72 @@ import Testing
 @testable import StudioCore
 
 struct AssetRecoveryTests {
+    @Test func movedTrashJournalFinishesWhenOriginalSourceIsReoccupied() async throws {
+        let f = try OutputFixture()
+        let (job, id) = try await f.job()
+        let lease = try await f.directories.resolveForJob(job, directoryID: id)
+        let assets = GeneratedAssetStore(store: f.store, directories: f.directories)
+        let audio = try await assets.write(data: Data("owned audio".utf8), fileName: "audio.wav", kind: "audio", job: job, lease: lease)
+        let destination = lease.relativeDirectory! + "/recycled.wav"
+        let operation = FileOperation(id: "moved-trash", assetID: audio.id, sourceRelativePath: audio.relativePath, destinationRelativePath: destination, kind: .trash)
+        try await f.store.journalFileOperation(operation)
+        try FileManager.default.moveItem(at: f.output.appendingPathComponent(audio.relativePath), to: f.output.appendingPathComponent(destination))
+        try Data("new user source".utf8).write(to: f.output.appendingPathComponent(audio.relativePath))
+        try await assets.reconcilePendingOperations()
+        #expect(try await f.store.pendingFileOperations().isEmpty)
+        #expect(try await f.store.getAsset(id: audio.id)?.relativePath == destination)
+        #expect(try await f.store.originalAssetPath(id: audio.id) == audio.relativePath)
+        #expect(try String(contentsOf: f.output.appendingPathComponent(audio.relativePath), encoding: .utf8) == "new user source")
+        #expect(try String(contentsOf: f.output.appendingPathComponent(destination), encoding: .utf8) == "owned audio")
+        try await assets.restore(job: job)
+        let recovered = try #require(try await f.store.getAsset(id: audio.id))
+        #expect(recovered.relativePath != audio.relativePath)
+        #expect(try String(contentsOf: f.output.appendingPathComponent(recovered.relativePath), encoding: .utf8) == "owned audio")
+        lease.close()
+        try await f.cleanup()
+    }
+
+    @Test func movedRestoreJournalFinishesWhenRecycleSourceIsReoccupied() async throws {
+        let f = try OutputFixture()
+        let (job, id) = try await f.job()
+        let lease = try await f.directories.resolveForJob(job, directoryID: id)
+        let assets = GeneratedAssetStore(store: f.store, directories: f.directories)
+        let audio = try await assets.write(data: Data("owned audio".utf8), fileName: "audio.wav", kind: "audio", job: job, lease: lease)
+        _ = try await f.store.cancelQueued(id: job)
+        try await assets.trash(job: job, scope: .generatedFiles)
+        let recycled = try #require(try await f.store.getAsset(id: audio.id))
+        try await f.store.journalFileOperation(FileOperation(id: "moved-restore", assetID: audio.id, sourceRelativePath: recycled.relativePath, destinationRelativePath: audio.relativePath, kind: .restore))
+        try FileManager.default.moveItem(at: f.output.appendingPathComponent(recycled.relativePath), to: f.output.appendingPathComponent(audio.relativePath))
+        try Data("new recycle occupant".utf8).write(to: f.output.appendingPathComponent(recycled.relativePath))
+        try await assets.restore(job: job)
+        #expect(try await f.store.pendingFileOperations().isEmpty)
+        #expect(try await f.store.getAsset(id: audio.id)?.relativePath == audio.relativePath)
+        #expect(try await f.store.originalAssetPath(id: audio.id) == nil)
+        #expect(try await f.store.listLibrary().contains { $0.id == job })
+        #expect(try String(contentsOf: f.output.appendingPathComponent(recycled.relativePath), encoding: .utf8) == "new recycle occupant")
+        #expect(try String(contentsOf: f.output.appendingPathComponent(audio.relativePath), encoding: .utf8) == "owned audio")
+        lease.close()
+        try await f.cleanup()
+    }
+
+    @Test func unconfirmedJournalPreservesPendingAndRecoveryMetadata() async throws {
+        let f = try OutputFixture()
+        let (job, id) = try await f.job()
+        let lease = try await f.directories.resolveForJob(job, directoryID: id)
+        let assets = GeneratedAssetStore(store: f.store, directories: f.directories)
+        let audio = try await assets.write(data: Data("owned audio".utf8), fileName: "audio.wav", kind: "audio", job: job, lease: lease)
+        let destination = lease.relativeDirectory! + "/recycled.wav"
+        let operation = FileOperation(id: "unconfirmed", assetID: audio.id, sourceRelativePath: audio.relativePath, destinationRelativePath: destination, kind: .trash)
+        try await f.store.journalFileOperation(operation)
+        try FileManager.default.moveItem(at: f.output.appendingPathComponent(audio.relativePath), to: lease.url.appendingPathComponent("moved-by-user.wav"))
+        for path in [audio.relativePath, destination] { try Data("user file".utf8).write(to: f.output.appendingPathComponent(path)) }
+        await #expect(throws: OutputDirectoryError.invalidPath) { try await assets.reconcilePendingOperations() }
+        #expect(try await f.store.pendingFileOperations() == [operation])
+        #expect(try await f.store.originalAssetPath(id: audio.id) == audio.relativePath)
+        for path in [audio.relativePath, destination] { #expect(try String(contentsOf: f.output.appendingPathComponent(path), encoding: .utf8) == "user file") }
+        lease.close()
+        try await f.cleanup()
+    }
     @Test func writesRejectTraversalOverwriteAndClosedLeaseAndFinderRequiresRegistration() async throws {
         let f = try OutputFixture()
         let (job, id) = try await f.job()

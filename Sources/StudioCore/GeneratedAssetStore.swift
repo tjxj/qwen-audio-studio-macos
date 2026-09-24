@@ -90,22 +90,27 @@ public actor GeneratedAssetStore {
                   let identity = asset.fileIdentity else { throw OutputDirectoryError.invalidPath }
             if let job, asset.jobID != job { continue }
             let lease = try await directories.resolve(asset.directoryID); defer { lease.close() }
-            let sourceExists = try lease.withAccess { try $0.exists(operation.sourceRelativePath) }
-            if sourceExists, try lease.withAccess({ try $0.exists(operation.destinationRelativePath) }) {
-                // The planned name was occupied while the app was stopped. Record
-                // a fresh exclusive move, preserving the conflicting user's file.
-                let destination = operation.destinationRelativePath + "-恢复-" + UUID().uuidString
-                try await store.finishFileOperation(id: operation.id, error: "目标已存在，改用新的恢复名称。")
-                try await move(asset: asset, to: destination, kind: operation.kind, lease: lease)
+            let targetMatches = try lease.withAccess { access in
+                // A completed rename remains completed when a user subsequently
+                // occupies the old path. Never infer ownership from existence.
+                (try? access.identity(operation.destinationRelativePath)) == identity
+            }
+            if targetMatches {
+                try await store.finishFileOperation(id: operation.id)
                 continue
             }
-            try lease.withAccess { access in
-                if sourceExists {
-                    try access.move(source: operation.sourceRelativePath, destination: operation.destinationRelativePath, identity: identity)
-                } else {
-                    guard try access.identity(operation.destinationRelativePath) == identity else { throw OutputDirectoryError.invalidPath }
-                }
+            let targetOccupied = try lease.withAccess { access in
+                guard (try? access.identity(operation.sourceRelativePath)) == identity else { throw OutputDirectoryError.invalidPath }
+                return try access.exists(operation.destinationRelativePath)
             }
+            let resumed: FileOperation
+            if targetOccupied {
+                resumed = try await store.retargetPendingFileOperation(id: operation.id,
+                    destinationRelativePath: operation.destinationRelativePath + "-恢复-" + UUID().uuidString)
+            } else { resumed = operation }
+            // On any uncertain result leave this journal pending and preserve its
+            // original recovery path, so a subsequent run can inspect identities.
+            try lease.withAccess { try $0.move(source: resumed.sourceRelativePath, destination: resumed.destinationRelativePath, identity: identity) }
             try await store.finishFileOperation(id: operation.id)
         }
     }

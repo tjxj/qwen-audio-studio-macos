@@ -43,12 +43,50 @@ public actor OutputDirectoryStore {
         try access.probe()
         let data = try bookmarks.create(for: selectedURL)
         let id = "dir_" + UUID().uuidString
-        try await store.saveDirectory(DirectorySnapshot(id: id, version: 1, bookmark: data))
+        try await store.saveDirectory(DirectorySnapshot(id: id, version: 1, bookmark: data, rootIdentity: try access.rootIdentity()))
         return id
     }
     public func setDefault(_ id: String) async throws {
         let lease = try await resolve(id); defer { lease.close() }
         try await store.setDefaultDirectory(id: id)
+    }
+    public func reauthorize(directoryID: String, selectedURL: URL) async throws {
+        guard selectedURL.isFileURL else { throw OutputDirectoryError.invalidPath }
+        guard let snapshot = try await store.getDirectory(id: directoryID) else { throw OutputDirectoryError.unregistered }
+        let started = bookmarks.start(selectedURL)
+        defer { if started { bookmarks.stop(selectedURL) } }
+        let access = try ScopedFileAccess(url: selectedURL)
+        let identity = try access.rootIdentity()
+        if let expected = snapshot.rootIdentity {
+            guard identity == expected else { throw OutputDirectoryError.directoryMismatch }
+        } else {
+            guard try await provesLegacyDirectory(directoryID, access: access) else { throw OutputDirectoryError.directoryMismatch }
+        }
+        // Verify the newly created grant before changing the old record. A
+        // cancelled picker, wrong folder or failed grant leaves ID/version intact.
+        let data = try bookmarks.create(for: selectedURL)
+        let resolved = try bookmarks.resolve(data)
+        guard bookmarks.start(resolved.url) else { throw OutputDirectoryError.reauthorizationRequired }
+        defer { bookmarks.stop(resolved.url) }
+        let reopened = try ScopedFileAccess(url: resolved.url)
+        guard try reopened.rootIdentity() == identity else { throw OutputDirectoryError.directoryMismatch }
+        try reopened.probe()
+        try await store.replaceDirectory(DirectorySnapshot(id: directoryID, version: snapshot.version + 1,
+            bookmark: data, rootIdentity: identity), expected: snapshot)
+    }
+    private func provesLegacyDirectory(_ id: String, access: ScopedFileAccess) async throws -> Bool {
+        for folder in try await store.listJobOutputFolders(directoryID: id) {
+            if (try? access.identity(folder.relativePath, directory: true)) == folder.identity { return true }
+        }
+        let pending = try await store.pendingFileOperations()
+        for asset in try await store.listAssets(directoryID: id) where asset.appOwned {
+            guard let identity = asset.fileIdentity else { continue }
+            // An interrupted move may already have reached its destination while
+            // the stored asset still names its old path, now occupied by a user.
+            let targets = pending.filter { $0.assetID == asset.id }.map(\.destinationRelativePath) + [asset.relativePath]
+            if targets.contains(where: { (try? access.identity($0)) == identity }) { return true }
+        }
+        return false
     }
     public func defaultDirectoryID() async throws -> String? { try await store.defaultDirectoryID() }
     public func applySelection(_ url: URL?, currentID: String?) async throws -> String? {
@@ -64,9 +102,12 @@ public actor OutputDirectoryStore {
         guard bookmarks.start(result.url) else { throw OutputDirectoryError.reauthorizationRequired }
         do {
             let access = try ScopedFileAccess(url: result.url)
-            if result.stale {
-                let refreshed = try bookmarks.create(for: result.url)
-                try await store.saveDirectory(DirectorySnapshot(id: snapshot.id, version: snapshot.version + 1, bookmark: refreshed))
+            let identity = try access.rootIdentity()
+            if let expected = snapshot.rootIdentity, expected != identity { throw OutputDirectoryError.directoryMismatch }
+            if result.stale || snapshot.rootIdentity == nil {
+                let refreshed = result.stale ? try bookmarks.create(for: result.url) : snapshot.bookmark
+                try await store.replaceDirectory(DirectorySnapshot(id: snapshot.id, version: snapshot.version + 1,
+                    bookmark: refreshed, rootIdentity: identity), expected: snapshot)
             }
             let provider = bookmarks
             return DirectoryLease(directoryID: snapshot.id, rootURL: result.url, jobID: jobID,

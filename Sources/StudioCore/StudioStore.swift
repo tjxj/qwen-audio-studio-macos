@@ -69,6 +69,13 @@ public actor StudioStore {
     public func getDirectory(id: String) throws -> DirectorySnapshot? {
         try db.rows("SELECT snapshot FROM directories WHERE id=?", [.text(id)]).first.map { try storeDecode(DirectorySnapshot.self, $0[0]) }
     }
+    public func replaceDirectory(_ updated: DirectorySnapshot, expected: DirectorySnapshot) throws {
+        try db.transaction {
+            guard updated.id == expected.id, updated.version == expected.version + 1,
+                  try getDirectory(id: expected.id) == expected else { throw StudioStoreError.staleDirectory }
+            try saveDirectory(updated)
+        }
+    }
     public func setDefaultDirectory(id: String) throws {
         guard try getDirectory(id: id) != nil else { throw StudioStoreError.missing }
         try db.execute("INSERT INTO output_settings(singleton,default_directory_id) VALUES(1,?) ON CONFLICT(singleton) DO UPDATE SET default_directory_id=excluded.default_directory_id", [.text(id)])
@@ -80,6 +87,12 @@ public actor StudioStore {
         guard let row = try db.rows("SELECT directory_id,relative_path,identity FROM job_output_folders WHERE job_id=?", [.text(jobID)]).first,
               let directory = row[0].string, let path = row[1].string else { return nil }
         return JobOutputFolder(jobID: jobID, directoryID: directory, relativePath: path, identity: try storeDecode(FileIdentity.self, row[2]))
+    }
+    public func listJobOutputFolders(directoryID: String) throws -> [JobOutputFolder] {
+        try db.rows("SELECT job_id,relative_path,identity FROM job_output_folders WHERE directory_id=?", [.text(directoryID)]).map { row in
+            guard let jobID = row[0].string, let path = row[1].string else { throw StudioStoreError.corruptRecord }
+            return JobOutputFolder(jobID: jobID, directoryID: directoryID, relativePath: path, identity: try storeDecode(FileIdentity.self, row[2]))
+        }
     }
     public func reserveJobOutputFolder(_ folder: JobOutputFolder) throws -> JobOutputFolder {
         guard Self.safeRelativePath(folder.relativePath) else { throw StudioStoreError.invalidPath }
@@ -261,6 +274,9 @@ public actor StudioStore {
     public func listAssets(jobID: String) throws -> [StoredAsset] {
         try db.rows("SELECT metadata FROM assets WHERE job_id=? ORDER BY rowid", [.text(jobID)]).map { try storeDecode(StoredAsset.self, $0[0]) }
     }
+    public func listAssets(directoryID: String) throws -> [StoredAsset] {
+        try db.rows("SELECT metadata FROM assets WHERE directory_id=? ORDER BY rowid", [.text(directoryID)]).map { try storeDecode(StoredAsset.self, $0[0]) }
+    }
     /// Journal first; Task 5 moves files outside this transaction, then finishes the entry.
     public func journalFileOperation(_ operation: FileOperation) throws {
         guard Self.safeRelativePath(operation.sourceRelativePath), Self.safeRelativePath(operation.destinationRelativePath),
@@ -278,6 +294,20 @@ public actor StudioStore {
     }
     public func pendingFileOperations() throws -> [FileOperation] {
         try db.rows("SELECT operation FROM file_operations WHERE state='pending' ORDER BY rowid").map { try storeDecode(FileOperation.self, $0[0]) }
+    }
+    /// Keep the same pending operation and recovery metadata when a newly
+    /// occupied destination requires a different exclusive name.
+    public func retargetPendingFileOperation(id: String, destinationRelativePath: String) throws -> FileOperation {
+        guard Self.safeRelativePath(destinationRelativePath) else { throw StudioStoreError.invalidPath }
+        return try db.transaction {
+            guard let row = try db.rows("SELECT operation FROM file_operations WHERE id=? AND state='pending'", [.text(id)]).first else { throw StudioStoreError.missing }
+            let old = try storeDecode(FileOperation.self, row[0])
+            guard old.sourceRelativePath != destinationRelativePath else { throw StudioStoreError.invalidPath }
+            let updated = FileOperation(id: old.id, assetID: old.assetID, sourceRelativePath: old.sourceRelativePath,
+                destinationRelativePath: destinationRelativePath, kind: old.kind)
+            try db.execute("UPDATE file_operations SET operation=? WHERE id=? AND state='pending'", [.blob(try storeEncode(updated)), .text(id)])
+            return updated
+        }
     }
     public func finishFileOperation(id: String, error: String? = nil) throws {
         try db.transaction {

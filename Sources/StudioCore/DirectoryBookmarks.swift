@@ -1,7 +1,7 @@
 import Foundation
 
 public enum OutputDirectoryError: Error, Equatable, Sendable {
-    case unregistered, reauthorizationRequired, unavailable, invalidPath, conflict, closed
+    case unregistered, reauthorizationRequired, unavailable, invalidPath, conflict, closed, directoryMismatch
 }
 public struct BookmarkResolution: Sendable {
     public let url: URL

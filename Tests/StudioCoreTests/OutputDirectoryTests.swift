@@ -62,6 +62,108 @@ final class BookmarkAccessProbe: DirectoryBookmarking, @unchecked Sendable {
 }
 
 struct OutputDirectoryTests {
+    @Test func reauthorizationKeepsDirectoryIDAndRecoversOldAssetAndPendingMove() async throws {
+        let f = try OutputFixture()
+        let (job, id) = try await f.job()
+        try await f.directories.setDefault(id)
+        let lease = try await f.directories.resolveForJob(job, directoryID: id)
+        let assets = GeneratedAssetStore(store: f.store, directories: f.directories)
+        let audio = try await assets.write(data: Data("owned".utf8), fileName: "audio.wav", kind: "audio", job: job, lease: lease)
+        let snapshot = try #require(try await f.store.getDirectory(id: id))
+        #expect(snapshot.rootIdentity != nil)
+        let destination = lease.relativeDirectory! + "/recycled.wav"
+        let pending = FileOperation(id: "reauthorize-pending", assetID: audio.id, sourceRelativePath: audio.relativePath, destinationRelativePath: destination, kind: .trash)
+        try await f.store.journalFileOperation(pending)
+        lease.close()
+        let expired = DirectorySnapshot(id: id, version: snapshot.version, bookmark: Data([0]), rootIdentity: snapshot.rootIdentity)
+        try await f.store.saveDirectory(expired)
+        await #expect(throws: OutputDirectoryError.reauthorizationRequired) { try await assets.resolveRegisteredAsset(audio.id) }
+        try await f.directories.reauthorize(directoryID: id, selectedURL: f.output)
+        let renewed = try #require(try await f.store.getDirectory(id: id))
+        #expect(renewed.id == id)
+        #expect(renewed.version == expired.version + 1)
+        #expect(renewed.bookmark != expired.bookmark)
+        #expect(try await f.directories.defaultDirectoryID() == id)
+        let (revealed, url) = try await assets.resolveRegisteredAsset(audio.id)
+        #expect(url == f.output.appendingPathComponent(audio.relativePath))
+        revealed.close()
+        try await assets.reconcilePendingOperations()
+        #expect(try await f.store.pendingFileOperations().isEmpty)
+        #expect(try await f.store.getAsset(id: audio.id)?.directoryID == id)
+        #expect(try await f.store.getAsset(id: audio.id)?.relativePath == destination)
+        try await assets.restore(job: job)
+        #expect(try String(contentsOf: f.output.appendingPathComponent(audio.relativePath), encoding: .utf8) == "owned")
+        try await f.cleanup()
+    }
+
+    @Test func wrongDirectoryCannotReplaceExpiredBookmarkOrVersion() async throws {
+        let f = try OutputFixture()
+        let id = try await f.directories.register(selectedURL: f.output)
+        let snapshot = try #require(try await f.store.getDirectory(id: id))
+        let expired = DirectorySnapshot(id: id, version: snapshot.version, bookmark: Data([0]), rootIdentity: snapshot.rootIdentity)
+        try await f.store.saveDirectory(expired)
+        let wrong = f.root.appendingPathComponent("错误目录")
+        try FileManager.default.createDirectory(at: wrong, withIntermediateDirectories: false)
+        try Data("untouched".utf8).write(to: wrong.appendingPathComponent("sentinel"))
+        await #expect(throws: OutputDirectoryError.directoryMismatch) { try await f.directories.reauthorize(directoryID: id, selectedURL: wrong) }
+        #expect(try await f.store.getDirectory(id: id) == expired)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: wrong.path) == ["sentinel"])
+        try await f.cleanup()
+    }
+
+    @Test func legacySnapshotUsesOwnedAssetIdentityAtPendingDestinationForReauthorization() async throws {
+        let f = try OutputFixture()
+        let (job, id) = try await f.job()
+        let lease = try await f.directories.resolveForJob(job, directoryID: id)
+        let assets = GeneratedAssetStore(store: f.store, directories: f.directories)
+        let audio = try await assets.write(data: Data("owned".utf8), fileName: "audio.wav", kind: "audio", job: job, lease: lease)
+        let destination = lease.relativeDirectory! + "/recycled.wav"
+        try await f.store.journalFileOperation(FileOperation(id: "legacy-pending", assetID: audio.id, sourceRelativePath: audio.relativePath, destinationRelativePath: destination, kind: .trash))
+        try FileManager.default.moveItem(at: f.output.appendingPathComponent(audio.relativePath), to: f.output.appendingPathComponent(destination))
+        try Data("new user file".utf8).write(to: f.output.appendingPathComponent(audio.relativePath))
+        lease.close()
+        // Version-one/two JSON has no rootIdentity. Remove the optional property
+        // through the original initializer to reproduce an installed old record.
+        let legacy = DirectorySnapshot(id: id, version: 1, bookmark: Data([0]))
+        try await f.store.saveDirectory(legacy)
+        let raw = try SQLiteConnection(url: f.root.appendingPathComponent("metadata/studio.sqlite"))
+        try raw.execute("DELETE FROM job_output_folders WHERE job_id=?", [.text(job)])
+        try raw.close()
+        let copied = f.root.appendingPathComponent("复制目录")
+        try FileManager.default.copyItem(at: f.output, to: copied)
+        await #expect(throws: OutputDirectoryError.directoryMismatch) { try await f.directories.reauthorize(directoryID: id, selectedURL: copied) }
+        #expect(try await f.store.getDirectory(id: id) == legacy)
+        try await f.directories.reauthorize(directoryID: id, selectedURL: f.output)
+        #expect(try await f.store.getDirectory(id: id)?.rootIdentity != nil)
+        try await assets.reconcilePendingOperations()
+        #expect(try await f.store.getAsset(id: audio.id)?.relativePath == destination)
+        #expect(try String(contentsOf: f.output.appendingPathComponent(audio.relativePath), encoding: .utf8) == "new user file")
+        try await f.cleanup()
+    }
+
+    @Test func unprovableLegacyDirectoryIsNotRebound() async throws {
+        let f = try OutputFixture()
+        let legacy = DirectorySnapshot(id: "unprovable", version: 1, bookmark: Data([0]))
+        try await f.store.saveDirectory(legacy)
+        await #expect(throws: OutputDirectoryError.directoryMismatch) { try await f.directories.reauthorize(directoryID: legacy.id, selectedURL: f.output) }
+        #expect(try await f.store.getDirectory(id: legacy.id) == legacy)
+        try await f.cleanup()
+    }
+    @Test func legacySnapshotCanUseReservedJobDirectoryIdentity() async throws {
+        let f = try OutputFixture()
+        let (job, id) = try await f.job()
+        let lease = try await f.directories.resolveForJob(job, directoryID: id)
+        lease.close()
+        let legacy = DirectorySnapshot(id: id, version: 1, bookmark: Data([0]))
+        try await f.store.saveDirectory(legacy)
+        try await f.directories.reauthorize(directoryID: id, selectedURL: f.output)
+        let renewed = try #require(try await f.store.getDirectory(id: id))
+        #expect(renewed.rootIdentity != nil)
+        let reopened = try await f.directories.resolveForJob(job, directoryID: id)
+        #expect(reopened.url == lease.url)
+        reopened.close()
+        try await f.cleanup()
+    }
     @Test func staleBookmarkRefreshesAndLeaseKeepsAccessUntilClose() async throws {
         let probe = BookmarkAccessProbe(stale: true)
         let f = try OutputFixture(bookmarks: probe)

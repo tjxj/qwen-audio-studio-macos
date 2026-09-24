@@ -11,6 +11,12 @@ final class ScopedFileAccess {
     }
     deinit { Darwin.close(fd) }
 
+    func rootIdentity() throws -> FileIdentity {
+        var info = stat()
+        guard fstat(fd, &info) == 0, info.st_mode & S_IFMT == S_IFDIR else { throw OutputDirectoryError.unavailable }
+        return FileIdentity(device: info.st_dev, inode: info.st_ino)
+    }
+
     static func components(_ path: String) throws -> [String] {
         let parts = path.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
         guard !parts.isEmpty, !parts.contains(where: { $0.isEmpty || $0 == "." || $0 == ".." || $0.contains("\0") }) else { throw OutputDirectoryError.invalidPath }

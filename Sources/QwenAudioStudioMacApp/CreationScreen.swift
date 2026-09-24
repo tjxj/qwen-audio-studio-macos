@@ -172,8 +172,18 @@ struct CreationScreen: View {
                     } } label: { Label(outputFolderName, systemImage: "folder").lineLimit(1) }
                         .disabled(outputFolders.directories == nil || outputFolders.isChoosing)
                     if let id = draft.fields.outputDirectoryID ?? outputFolders.defaultID {
-                        Button { Task { await outputFolders.revealDirectory(id) } } label: { Image(systemName: "arrow.up.forward.square") }
-                            .help("在 Finder 显示")
+                        Menu {
+                            Button("在 Finder 显示") { Task { await outputFolders.revealDirectory(id) } }
+                            Button("重新授权原文件夹…") { Task {
+                                if await outputFolders.reauthorize(id) {
+                                    outputFolderName = (try? await outputFolders.name(for: id)) ?? "请重新授权输出目录"
+                                }
+                            } }
+                        } label: { Image(systemName: "ellipsis.circle") }
+                            .menuStyle(.borderlessButton)
+                            .fixedSize()
+                            .disabled(outputFolders.isChoosing)
+                            .help("输出文件夹操作")
                     }
                 }
                 .task(id: draft.fields.outputDirectoryID ?? outputFolders.defaultID) {

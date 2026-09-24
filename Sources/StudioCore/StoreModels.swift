@@ -10,7 +10,10 @@ public struct DirectorySnapshot: Codable, Equatable, Sendable, Identifiable {
     public let id: String
     public let version: Int
     public let bookmark: Data
-    public init(id: String, version: Int, bookmark: Data) { self.id = id; self.version = version; self.bookmark = bookmark }
+    public let rootIdentity: FileIdentity?
+    public init(id: String, version: Int, bookmark: Data, rootIdentity: FileIdentity? = nil) {
+        self.id = id; self.version = version; self.bookmark = bookmark; self.rootIdentity = rootIdentity
+    }
 }
 
 public struct ReferenceSnapshot: Codable, Equatable, Sendable, Identifiable {
