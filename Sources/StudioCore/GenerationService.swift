@@ -51,6 +51,17 @@ public protocol AudioDownloading: Sendable {
     func download(_ receipt: ProviderResponseSnapshot) async throws -> Data
 }
 
+public protocol BatchCommitting: Sendable {
+    func createBatch(_ submission: BatchSubmission) async throws -> StoredBatch
+}
+
+private struct SQLiteBatchCommitter: BatchCommitting {
+    let store: StudioStore
+    func createBatch(_ submission: BatchSubmission) async throws -> StoredBatch {
+        try await store.createBatch(submission)
+    }
+}
+
 public struct NextAudioDownloader: AudioDownloading {
     private let session: URLSession
     public init() { self.session = Self.makeSession(protocolClasses: nil) }
@@ -93,25 +104,34 @@ final class SecureDownloadRedirects: NSObject, URLSessionTaskDelegate, @unchecke
 }
 
 public actor GenerationService {
+    private enum AuthorizationState {
+        case ready
+        case committing(cancelRequested: Bool)
+        case committed(batchID: String)
+        case revoked(batchID: String)
+    }
     private struct AuthorizationEntry {
         let previewHash: String
         let authorization: GenerationAuthorization
-        var consumedBatchID: String?
+        var state: AuthorizationState
     }
     private let store: StudioStore
     private let directories: OutputDirectoryStore
     private let assets: GeneratedAssetStore
     private let synthesizer: any SynthesizerClient
     private let downloader: any AudioDownloading
+    private let batchCommitter: any BatchCommitting
     private let now: @Sendable () -> Date
     private var authorizations: [String: AuthorizationEntry] = [:]
     private var cancelledBatchIDs: Set<String> = []
 
     public init(store: StudioStore, directories: OutputDirectoryStore, assets: GeneratedAssetStore,
                 synthesizer: any SynthesizerClient, downloader: any AudioDownloading = NextAudioDownloader(),
-                now: @escaping @Sendable () -> Date = Date.init) {
+                now: @escaping @Sendable () -> Date = Date.init,
+                batchCommitter: (any BatchCommitting)? = nil) {
         self.store = store; self.directories = directories; self.assets = assets
         self.synthesizer = synthesizer; self.downloader = downloader; self.now = now
+        self.batchCommitter = batchCommitter ?? SQLiteBatchCommitter(store: store)
     }
 
     public func preflight(_ input: GenerationInput) async throws -> GenerationPlan {
@@ -148,7 +168,12 @@ public actor GenerationService {
         guard try plan.submission.requestHash() == plan.confirmationHash else { throw GenerationError.confirmationMismatch }
         if let existing = authorizations[plan.submission.clientRequestID] {
             guard existing.previewHash == plan.confirmationHash else { throw StudioStoreError.requestConflict }
-            if existing.consumedBatchID != nil { return existing.authorization }
+            switch existing.state {
+            case .committed: return existing.authorization
+            case .revoked, .committing(cancelRequested: true): throw GenerationError.confirmationMismatch
+            case .committing(cancelRequested: false): return existing.authorization
+            case .ready: break
+            }
             let consent = existing.authorization.submission.consent
             if consent.confirmedAt <= now(), consent.expiresAt > now() { return existing.authorization }
             authorizations.removeValue(forKey: plan.submission.clientRequestID)
@@ -165,17 +190,22 @@ public actor GenerationService {
         let authorization = GenerationAuthorization(confirmationHash: token,
                                                     clientRequestID: submission.clientRequestID, submission: submission)
         authorizations[submission.clientRequestID] = AuthorizationEntry(previewHash: plan.confirmationHash,
-                                                                          authorization: authorization, consumedBatchID: nil)
+                                                                          authorization: authorization, state: .ready)
         return authorization
     }
 
     /// Dismissed charge sheets can invalidate an unused token. A submitted
     /// batch remains durable and cannot be revoked through this method.
     public func revokeAuthorization(_ authorization: GenerationAuthorization) {
-        guard let stored = authorizations[authorization.clientRequestID],
-              stored.authorization.confirmationHash == authorization.confirmationHash,
-              stored.consumedBatchID == nil else { return }
-        authorizations.removeValue(forKey: authorization.clientRequestID)
+        guard var stored = authorizations[authorization.clientRequestID],
+              stored.authorization.confirmationHash == authorization.confirmationHash else { return }
+        switch stored.state {
+        case .ready: authorizations.removeValue(forKey: authorization.clientRequestID)
+        case .committing:
+            stored.state = .committing(cancelRequested: true)
+            authorizations[authorization.clientRequestID] = stored
+        case .committed, .revoked: break
+        }
     }
 
     public func submit(_ plan: GenerationPlan, confirmedHash: String, clientRequestID: String) async throws -> StoredBatch {
@@ -183,18 +213,60 @@ public actor GenerationService {
               try plan.submission.requestHash() == plan.confirmationHash,
               let stored = authorizations[clientRequestID], stored.previewHash == plan.confirmationHash,
               stored.authorization.confirmationHash == confirmedHash else { throw GenerationError.confirmationMismatch }
-        if let consumedBatchID = stored.consumedBatchID {
-            guard let batch = try await store.getBatch(id: consumedBatchID) else { throw StudioStoreError.corruptRecord }
+        switch stored.state {
+        case .committed(let id):
+            guard let batch = try await store.getBatch(id: id) else { throw StudioStoreError.corruptRecord }
             return batch
+        case .revoked, .committing(cancelRequested: true): throw GenerationError.confirmationMismatch
+        case .ready:
+            authorizations[clientRequestID]?.state = .committing(cancelRequested: false)
+        case .committing(cancelRequested: false): break
         }
         let confirmed = stored.authorization.submission
         // createBatch durably commits the complete snapshot before any paid request.
-        let batch = try await store.createBatch(confirmed)
-        if let consumedBatchID = authorizations[clientRequestID]?.consumedBatchID {
-            guard let original = try await store.getBatch(id: consumedBatchID) else { throw StudioStoreError.corruptRecord }
-            return original
+        let batch: StoredBatch
+        do { batch = try await batchCommitter.createBatch(confirmed) }
+        catch {
+            if var latest = authorizations[clientRequestID],
+               latest.authorization.confirmationHash == confirmedHash {
+                switch latest.state {
+                case .committing(cancelRequested: true): authorizations.removeValue(forKey: clientRequestID)
+                case .committing(cancelRequested: false):
+                    latest.state = .ready
+                    authorizations[clientRequestID] = latest
+                case .ready, .committed, .revoked: break
+                }
+            }
+            throw error
         }
-        authorizations[clientRequestID]?.consumedBatchID = batch.id
+        guard var latest = authorizations[clientRequestID],
+              latest.authorization.confirmationHash == confirmedHash else {
+            cancelledBatchIDs.insert(batch.id)
+            for id in batch.jobIDs { _ = try? await store.cancelQueued(id: id) }
+            throw GenerationError.confirmationMismatch
+        }
+        switch latest.state {
+        case .committing(cancelRequested: true):
+            latest.state = .revoked(batchID: batch.id)
+            authorizations[clientRequestID] = latest
+            cancelledBatchIDs.insert(batch.id)
+            for id in batch.jobIDs { _ = try? await store.cancelQueued(id: id) }
+            return batch
+        case .committing(cancelRequested: false):
+            latest.state = .committed(batchID: batch.id)
+            authorizations[clientRequestID] = latest
+        case .committed(let id):
+            guard let original = try await store.getBatch(id: id) else { throw StudioStoreError.corruptRecord }
+            return original
+        case .revoked:
+            cancelledBatchIDs.insert(batch.id)
+            for id in batch.jobIDs { _ = try? await store.cancelQueued(id: id) }
+            throw GenerationError.confirmationMismatch
+        case .ready:
+            cancelledBatchIDs.insert(batch.id)
+            for id in batch.jobIDs { _ = try? await store.cancelQueued(id: id) }
+            throw GenerationError.confirmationMismatch
+        }
         for (index, id) in batch.jobIDs.enumerated() {
             if Task.isCancelled { cancelledBatchIDs.insert(batch.id) }
             if cancelledBatchIDs.contains(batch.id) {

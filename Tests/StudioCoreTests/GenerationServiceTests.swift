@@ -18,6 +18,31 @@ private actor FakeSynthesizer: SynthesizerClient {
     func calls() -> [Int] { seeds }
 }
 
+private actor PausedBatchCommitter: BatchCommitting {
+    private let store: StudioStore
+    private var entered = 0
+    private var entryWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
+    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+    init(store: StudioStore) { self.store = store }
+    func createBatch(_ submission: BatchSubmission) async throws -> StoredBatch {
+        entered += 1
+        let ready = entryWaiters.filter { $0.0 <= entered }
+        entryWaiters.removeAll { $0.0 <= entered }
+        ready.forEach { $0.1.resume() }
+        await withCheckedContinuation { releaseWaiters.append($0) }
+        return try await store.createBatch(submission)
+    }
+    func waitForEntries(_ count: Int) async {
+        if entered >= count { return }
+        await withCheckedContinuation { entryWaiters.append((count, $0)) }
+    }
+    func releaseAll() {
+        let waiting = releaseWaiters
+        releaseWaiters = []
+        waiting.forEach { $0.resume() }
+    }
+}
+
 struct GenerationServiceTests {
     private func fixture() throws -> (URL, StudioStore, OutputDirectoryStore, GeneratedAssetStore, FakeSynthesizer, GenerationService) {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("generation-test-" + UUID().uuidString)
@@ -70,6 +95,53 @@ struct GenerationServiceTests {
         }
         #expect(await fake.calls().isEmpty)
         #expect(try await store.listLibrary().isEmpty)
+        try await store.close()
+    }
+
+    @Test func revokingWhileBatchCommitAwaitsCancelsAllQueuedBeforeAnyPost() async throws {
+        let (root, store, dirs, assets, fake, _) = try fixture(); defer { try? FileManager.default.removeItem(at: root) }
+        let gate = PausedBatchCommitter(store: store)
+        let service = GenerationService(store: store, directories: dirs, assets: assets, synthesizer: fake,
+                                        downloader: FakeAudioDownloader(), batchCommitter: gate)
+        let request = try await input(root, store, dirs, candidates: 2)
+        let plan = try await service.preflight(request)
+        let authorization = try await service.confirm(plan)
+        let submitting = Task {
+            try await service.submit(plan, confirmedHash: authorization.confirmationHash,
+                                     clientRequestID: request.clientRequestID)
+        }
+        await gate.waitForEntries(1)
+        await service.revokeAuthorization(authorization)
+        await #expect(throws: GenerationError.confirmationMismatch) { try await service.confirm(plan) }
+        await gate.releaseAll()
+        let batch = try await submitting.value
+        #expect(await fake.calls().isEmpty)
+        for id in batch.jobIDs { #expect(try await store.getJob(id: id)?.state == .cancelled) }
+        await #expect(throws: GenerationError.confirmationMismatch) {
+            try await service.submit(plan, confirmedHash: authorization.confirmationHash,
+                                     clientRequestID: request.clientRequestID)
+        }
+        await #expect(throws: GenerationError.confirmationMismatch) { try await service.confirm(plan) }
+        try await store.close()
+    }
+
+    @Test func concurrentDuplicateSubmitWhileCommitAwaitsPostsOnce() async throws {
+        let (root, store, dirs, assets, fake, _) = try fixture(); defer { try? FileManager.default.removeItem(at: root) }
+        let gate = PausedBatchCommitter(store: store)
+        let service = GenerationService(store: store, directories: dirs, assets: assets, synthesizer: fake,
+                                        downloader: FakeAudioDownloader(), batchCommitter: gate)
+        let request = try await input(root, store, dirs)
+        let plan = try await service.preflight(request)
+        let authorization = try await service.confirm(plan)
+        let first = Task { try await service.submit(plan, confirmedHash: authorization.confirmationHash,
+                                                    clientRequestID: request.clientRequestID) }
+        let second = Task { try await service.submit(plan, confirmedHash: authorization.confirmationHash,
+                                                     clientRequestID: request.clientRequestID) }
+        await gate.waitForEntries(2)
+        await gate.releaseAll()
+        let a = try await first.value, b = try await second.value
+        #expect(a.id == b.id)
+        #expect(await fake.calls().count == 1)
         try await store.close()
     }
 
@@ -181,6 +253,7 @@ struct GenerationServiceTests {
             #expect(Set(assets.map(\.kind)) == ["audio", "prompt", "report"])
             for asset in assets { #expect(FileManager.default.fileExists(atPath: root.appendingPathComponent("output").appendingPathComponent(asset.relativePath).path)) }
         }
+        await service.revokeAuthorization(authorization)
         #expect(try await service.submit(plan, confirmedHash: authorization.confirmationHash, clientRequestID: request.clientRequestID).id == batch.id)
         #expect(await fake.calls().count == 2)
         var changed = request; changed.candidateCount = 1
