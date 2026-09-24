@@ -112,9 +112,9 @@
 
 **Interfaces:** `AudioPlaybackController.play(assetID:)`, `seek(seconds:)`, `compare(assetA:assetB:)`, `switchToA/B()`, `setLoop(start:end:)`.
 
-- [ ] Add red playback tests with distinct 5/8-second real test tones: switching A/B produces one audible output at a shared position within 150ms, main playback pauses when compare starts, seek/10s-back/volume/0.5s loop, missing file and route change release old output.
-- [ ] Decode actual samples and cache waveform by asset hash; use one AVAudioEngine player ownership controller. List every version; show actual validation result and PCM playability only after correct native decoding.
-- [ ] Verify with audio fixture and inspect the native result screen, then commit.
+- [x] Add red playback tests with distinct 5/8-second real test tones: switching A/B produces one audible output at a shared position within 150ms, main playback pauses when compare starts, seek/10s-back/volume/0.5s loop, missing file and route change release old output. Physical audible latency remains a final device check.
+- [x] Decode actual samples and cache waveform by asset hash; use one shared real-time output owner. The attempted AVAudioEngine route aborted on the current Bluetooth output, so the verified production owner uses one AVAudioPlayer. List every version; show actual validation result and PCM playability only after correct native decoding.
+- [x] Verify with audio fixture and inspect the native result screen, then commit.
 
 ### Task 9: Library and settings full wiring
 
