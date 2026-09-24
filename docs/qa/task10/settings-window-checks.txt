@@ -1,0 +1,12 @@
+data=public templates and synthetic draft; CapturePreferenceStore; temporary isolated root when --capture-task9-root is supplied; no network or user files
+hosting=private NSWindow + NSHostingView(AppShell); window minimum resize behavior not re-tested by this harness
+bundledTemplates=42
+minimum=780x618
+settings-light-1280: frame=780x618; pixels=1560x1236
+settings-dark-1280: frame=780x618; pixels=1560x1236
+settings-light-1120: frame=780x618; pixels=1560x1236
+settings-dark-1120: frame=780x618; pixels=1560x1236
+settings-light-1400: frame=780x618; pixels=1560x1236
+settings-dark-1400: frame=780x618; pixels=1560x1236
+settings-light-1600: frame=780x618; pixels=1560x1236
+settings-dark-1600: frame=780x618; pixels=1560x1236

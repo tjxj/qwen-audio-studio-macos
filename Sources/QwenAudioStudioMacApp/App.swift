@@ -9,6 +9,9 @@ struct QwenAudioStudioMacApp: App {
     @State private var outputFolders: OutputFolderController
     @State private var appState: AppState?
     init() {
+        if let argument = ProcessInfo.processInfo.arguments.first(where: { $0.hasPrefix("--verify-import-dialog-root=") }) {
+            NativeImportDialogQA.run(root: URL(fileURLWithPath: String(argument.dropFirst("--verify-import-dialog-root=".count)), isDirectory: true))
+        }
         if let argument = ProcessInfo.processInfo.arguments.first(where: { $0.hasPrefix("--verify-result-root=") }) {
             NativeResultQA.run(root: URL(fileURLWithPath: String(argument.dropFirst("--verify-result-root=".count)), isDirectory: true))
         }
@@ -172,7 +175,7 @@ struct QwenAudioStudioMacApp: App {
             if index == 0 { state.draft.load(project); try await state.store.setCurrentProject(id: project.id) }
             let compiled = try PromptCompiler.compile(mode: example.0, prompt: example.2, bindings: [])
             guard let directory = try await state.store.getDirectory(id: directoryID) else { continue }
-            let requestID = "synthetic-\(index)"
+            let requestID = "synthetic-\(UUID().uuidString)"
             let batch = try await state.store.createBatch(BatchSubmission(clientRequestID: requestID, project: project,
                 compiledPrompt: compiled.text, candidateSeeds: [100 + index], directory: directory, references: [],
                 consent: UploadConsent(clientRequestID: requestID, references: [], confirmed: true)))
@@ -232,13 +235,17 @@ struct QwenAudioStudioMacApp: App {
         checks.append("hosting=private NSWindow + NSHostingView(AppShell); window minimum resize behavior not re-tested by this harness")
         if let engine = try? TemplateEngine() { checks.append("bundledTemplates=\(engine.templates.count)") }
         checks.append("minimum=\(Int(window.minSize.width))x\(Int(window.minSize.height))")
-        for (width, name, appearance) in [
-            (1280, "\(prefix)-light-1280", NSAppearance.Name.aqua),
-            (1280, "\(prefix)-dark-1280", NSAppearance.Name.darkAqua),
-            (1120, "\(prefix)-light-1120", NSAppearance.Name.aqua),
-            (1120, "\(prefix)-dark-1120", NSAppearance.Name.darkAqua),
+        for (width, height, name, appearance) in [
+            (1280, 720, "\(prefix)-light-1280", NSAppearance.Name.aqua),
+            (1280, 720, "\(prefix)-dark-1280", NSAppearance.Name.darkAqua),
+            (1120, 720, "\(prefix)-light-1120", NSAppearance.Name.aqua),
+            (1120, 720, "\(prefix)-dark-1120", NSAppearance.Name.darkAqua),
+            (1400, 860, "\(prefix)-light-1400", NSAppearance.Name.aqua),
+            (1400, 860, "\(prefix)-dark-1400", NSAppearance.Name.darkAqua),
+            (1600, 900, "\(prefix)-light-1600", NSAppearance.Name.aqua),
+            (1600, 900, "\(prefix)-dark-1600", NSAppearance.Name.darkAqua),
         ] {
-            window.setFrame(NSRect(origin: window.frame.origin, size: NSSize(width: width, height: 720)), display: true)
+            window.setFrame(NSRect(origin: window.frame.origin, size: NSSize(width: width, height: height)), display: true)
             preferences.appearance = appearance == .aqua ? .light : .dark
             NSApp.appearance = NSAppearance(named: appearance)
             window.appearance = NSAppearance(named: appearance)

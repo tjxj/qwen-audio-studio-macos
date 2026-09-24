@@ -1,0 +1,11 @@
+2026-09-25 | Apple Silicon | macOS native local release QA | synthetic-only
+swift test --no-parallel --disable-sandbox: exit 0; 188 tests passed; 1 native panel test skipped by design
+scripts/test-build-dmg.sh: exit 0; hdiutil create/verify/attach; Applications symlink; mounted strict ad-hoc codesign; fonts, licenses, 42 templates
+scripts/test-capture-sizes.sh: exit 0; creation light/dark @ 1120,1280,1400,1600 widths; pixels=2x
+scripts/verify-dmg-install.sh: exit 0; read-only mount; copy to isolated temporary Applications; strict ad-hoc codesign; native UI launch x2; same synthetic SQLite reopened, projects=7 -> 14
+dist DMG hdiutil verify: checksum VALID
+DMG SHA-256: 059c09125d8d7216124b94244b59fa8df092ace9a5a541365bfe625b852582c0
+codesign -dv: Signature=adhoc; TeamIdentifier=not set; Developer ID identities=0; notarization=not performed
+otool -L executable: system libraries/frameworks only; no browser/Python/Node/ffmpeg runtime dependency
+NativeImportDialogQA: two bounded NSOpenPanel.runModal attempts timed out after 70s; no actual selection/cancel pass claim
+Manual VoiceOver spoken pass, complete keyboard tab-order, Finder/menu clicks, physical speaker listening and paid Next POST: pending

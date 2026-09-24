@@ -6,22 +6,29 @@ import StudioCore
 
 @MainActor @Observable final class LegacyImportFlow {
     let importer: LegacyImporter
+    @ObservationIgnored private let chooseDirectory: @MainActor () -> URL?
     private(set) var source: URL?
     private(set) var externalFolder: URL?
     private(set) var preview: LegacyImportCounts?
     private(set) var report: LegacyImportReport?
     private(set) var busy = false
     var errorMessage: String?
-    init(importer: LegacyImporter) { self.importer = importer }
-
-    func chooseFolder() async {
+    init(importer: LegacyImporter, chooseDirectory: @escaping @MainActor () -> URL? = {
         let panel = NSOpenPanel()
         panel.title = "选择旧版数据目录"
         panel.prompt = "预览此目录"
         panel.canChooseDirectories = true
         panel.canChooseFiles = false
         panel.allowsMultipleSelection = false
-        guard panel.runModal() == .OK, let url = panel.url else { return }
+        guard panel.runModal() == .OK else { return nil }
+        return panel.url
+    }) {
+        self.importer = importer
+        self.chooseDirectory = chooseDirectory
+    }
+
+    func chooseFolder() async {
+        guard let url = chooseDirectory() else { return }
         await inspect(source: url)
     }
     func chooseExternalFolder() async {
