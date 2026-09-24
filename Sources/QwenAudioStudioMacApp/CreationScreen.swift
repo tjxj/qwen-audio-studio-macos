@@ -5,6 +5,7 @@ import AppKit
 struct CreationScreen: View {
     @Environment(OutputFolderController.self) private var outputFolders
     @State private var outputFolderName = "尚未选择输出目录"
+    @State private var showsVoiceSheet = false
     let draft: DraftController
     var sharedUndoManager: UndoManager? = nil
     @Environment(StudioPreferences.self) private var preferences
@@ -27,6 +28,9 @@ struct CreationScreen: View {
         .background(StudioPalette.background)
         .navigationTitle("创作台")
         .task { editor.focus(); try? await draft.saveNow() }
+        .sheet(isPresented: $showsVoiceSheet) {
+            if let service = outputFolders.referenceAudio { VoiceSheet(controller: VoiceSheetController(service: service), draft: draft) }
+        }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button { Task { try? await draft.saveNow() } } label: {
@@ -134,6 +138,11 @@ struct CreationScreen: View {
                 insertButton("时间戳", tag: "【00:00】")
                 insertButton("音效", tag: "【音效】")
                 insertButton("音乐", tag: "【音乐】")
+                Button { showsVoiceSheet = true } label: { Label("音色", systemImage: "person.wave.2") }
+                    .font(.system(size: 11)).disabled(outputFolders.referenceAudio == nil)
+                ForEach(draft.fields.referenceBindings, id: \.referenceID) { binding in
+                    insertButton("@voice\(binding.slot)", tag: "@voice\(binding.slot)")
+                }
                 Spacer(minLength: 0)
             }
             PromptEditor(text: field(\.prompt), font: preferences.scriptFont.font(size: preferences.scriptSize), handle: editor, sharedUndoManager: sharedUndoManager)

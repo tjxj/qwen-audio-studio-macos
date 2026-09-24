@@ -222,6 +222,7 @@ struct OutputDirectoryTests {
         try await f.store.close()
         let raw = try SQLiteConnection(url: f.root.appendingPathComponent("metadata/studio.sqlite"))
         for table in ["recycled_assets", "removed_jobs", "job_output_folders", "output_settings"] { try raw.execute("DROP TABLE \(table)") }
+        try raw.execute("ALTER TABLE reference_voices DROP COLUMN last_used_ms")
         try raw.execute("PRAGMA user_version = 1")
         try raw.close()
         let reopened = try StudioStore(dataRoot: f.root.appendingPathComponent("metadata"))

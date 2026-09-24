@@ -3,6 +3,7 @@ set -euo pipefail
 
 repo_dir="${0:A:h:h}"
 cd "$repo_dir"
+bash scripts/build-native-codecs.sh
 
 export CLANG_MODULE_CACHE_PATH="${CLANG_MODULE_CACHE_PATH:-/private/tmp/qwen-native-module-cache}"
 export SWIFT_MODULE_CACHE_PATH="${SWIFT_MODULE_CACHE_PATH:-/private/tmp/qwen-native-module-cache}"
@@ -20,6 +21,7 @@ cp "$repo_dir/.build/release/QwenAudioStudioMacApp" "$app_dir/Contents/MacOS/"
 cp "$repo_dir/Resources/Info.plist" "$app_dir/Contents/Info.plist"
 cp "$repo_dir/Resources/Fonts/QwenStudioSerif-Regular.ttf" "$app_dir/Contents/Resources/"
 cp "$repo_dir/Resources/Fonts/OFL.txt" "$app_dir/Contents/Resources/"
+cp -R "$repo_dir/ThirdParty/Licenses" "$app_dir/Contents/Resources/NativeCodecLicenses"
 # Preserve the SwiftPM resource bundle inside the signed app's standard resource directory.
 resource_bundle="QwenAudioStudioMac_StudioCore.bundle"
 cp -R "$repo_dir/.build/release/$resource_bundle" "$app_dir/Contents/Resources/"

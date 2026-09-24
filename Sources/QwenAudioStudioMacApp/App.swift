@@ -8,6 +8,9 @@ struct QwenAudioStudioMacApp: App {
     @State private var preferences: StudioPreferences
     @State private var outputFolders: OutputFolderController
     init() {
+        if let argument = ProcessInfo.processInfo.arguments.first(where: { $0.hasPrefix("--verify-reference-audio-root=") }) {
+            NativeReferenceAudioQA.run(root: URL(fileURLWithPath: String(argument.dropFirst("--verify-reference-audio-root=".count)), isDirectory: true))
+        }
         if let argument = ProcessInfo.processInfo.arguments.first(where: { $0.hasPrefix("--verify-folder-dialog-root=") }) {
             NativeOutputFolderQA.run(root: URL(fileURLWithPath: String(argument.dropFirst("--verify-folder-dialog-root=".count)), isDirectory: true))
         }
@@ -45,7 +48,13 @@ struct QwenAudioStudioMacApp: App {
             AppShell()
                 .environment(preferences)
                 .environment(outputFolders)
-                .task { await outputFolders.loadDefault() }
+                .task {
+                    await outputFolders.loadDefault()
+                    while !Task.isCancelled {
+                        _ = try? await outputFolders.referenceAudio?.cleanup()
+                        try? await Task.sleep(for: .seconds(300))
+                    }
+                }
                 .preferredColorScheme(preferences.appearance.colorScheme)
                 .frame(minWidth: CGFloat(StudioLayout.minWidth),
                        minHeight: CGFloat(StudioLayout.minHeight - 52))

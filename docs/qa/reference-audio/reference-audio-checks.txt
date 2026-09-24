@@ -1,0 +1,10 @@
+data=synthetic tones only; network=none; playbackVolume=0
+wav=decoded; selection=1.000s; output=mono PCM16 WAV 24000Hz
+mp3=decoded; selection=1.000s; output=mono PCM16 WAV 24000Hz
+m4a=decoded; selection=1.000s; output=mono PCM16 WAV 24000Hz
+ogg=decoded; selection=1.000s; output=mono PCM16 WAV 24000Hz
+preview=source -> selection -> stopped; volume=0; one AVAudioPlayer
+source=40s unchanged; explicitTrim=12...18s; temporaryDefault=true; savedLibrary=1
+nativeSlider=target/action updates both endpoints; right-arrow keyboard changes start; external values synchronized; accessibility labels present
+light: window=1280x720; sheet=850x600; insideWindow=true; scale=2
+dark: window=1280x720; sheet=850x600; insideWindow=true; scale=2

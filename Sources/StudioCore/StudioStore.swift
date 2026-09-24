@@ -20,6 +20,7 @@ public actor StudioStore {
                                          [.text(template.id), .blob(try storeEncode(template))])
                 }
                 try database.execute("UPDATE jobs SET result_uncertain=CASE WHEN state='requesting' THEN 1 ELSE result_uncertain END, state='interrupted', message='应用重启，任务已中断；未重新提交。' WHERE state IN ('queued','preparing','requesting','downloading','validating')")
+                try database.execute("UPDATE reference_voices SET last_used_ms=? WHERE id IN (SELECT reference_id FROM reference_leases)", [.integer(Int(Date().timeIntervalSince1970 * 1000))])
                 try database.execute("DELETE FROM reference_leases WHERE job_id IN (SELECT id FROM jobs WHERE state IN ('success','failed','cancelled','interrupted'))")
             }
         } catch {
@@ -125,8 +126,8 @@ public actor StudioStore {
             if try activeLeaseCount(referenceID: reference.id) > 0, try getReference(id: reference.id) != reference {
                 throw StudioStoreError.staleReference
             }
-            try db.execute("INSERT INTO reference_voices(id,content_hash,snapshot) VALUES(?,?,?) ON CONFLICT(id) DO UPDATE SET content_hash=excluded.content_hash,snapshot=excluded.snapshot",
-                           [.text(reference.id), .text(reference.contentHash), .blob(try storeEncode(reference))])
+            try db.execute("INSERT INTO reference_voices(id,content_hash,snapshot,last_used_ms) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET content_hash=excluded.content_hash,snapshot=excluded.snapshot,last_used_ms=excluded.last_used_ms",
+                           [.text(reference.id), .text(reference.contentHash), .blob(try storeEncode(reference)), .integer(Int(Date().timeIntervalSince1970 * 1000))])
         }
     }
     public func getReference(id: String) throws -> ReferenceSnapshot? {
@@ -134,6 +135,44 @@ public actor StudioStore {
     }
     public func activeLeaseCount(referenceID: String) throws -> Int {
         try db.rows("SELECT COUNT(*) FROM reference_leases WHERE reference_id=?", [.text(referenceID)]).first?.first?.int ?? 0
+    }
+
+    public func listReferences() throws -> [ReferenceSnapshot] {
+        try db.rows("SELECT snapshot FROM reference_voices ORDER BY rowid DESC").map { try storeDecode(ReferenceSnapshot.self, $0[0]) }
+    }
+    public func acquireReference(_ referenceID: String, forJob jobID: String) throws {
+        try db.transaction {
+            guard let job = try getJob(id: jobID), !job.state.isTerminal,
+                  let batch = try getBatch(id: job.batchID),
+                  batch.submission.references.contains(where: { $0.id == referenceID }),
+                  try getReference(id: referenceID) != nil else { throw StudioStoreError.staleReference }
+            try db.execute("INSERT OR IGNORE INTO reference_leases(job_id,reference_id) VALUES(?,?)", [.text(jobID), .text(referenceID)])
+            try touchReference(referenceID)
+        }
+    }
+    public func releaseReferences(jobID: String) throws {
+        try db.transaction {
+            try releaseReferenceRows(jobID: jobID)
+        }
+    }
+    private func releaseReferenceRows(jobID: String) throws {
+        try db.execute("UPDATE reference_voices SET last_used_ms=? WHERE id IN (SELECT reference_id FROM reference_leases WHERE job_id=?)", [.integer(Int(Date().timeIntervalSince1970 * 1000)), .text(jobID)])
+        try db.execute("DELETE FROM reference_leases WHERE job_id=?", [.text(jobID)])
+    }
+    public func touchReference(_ id: String) throws {
+        try db.execute("UPDATE reference_voices SET last_used_ms=? WHERE id=?", [.integer(Int(Date().timeIntervalSince1970 * 1000)), .text(id)])
+    }
+    /// Atomically prevents a cleanup/createBatch race. Historic consent remains
+    /// in the immutable batch submission even when its expired clip is removed.
+    public func removeUnleasedTemporaryReference(_ id: String, idleBefore: Date) throws -> Bool {
+        try db.transaction {
+            guard let reference = try getReference(id: id), reference.temporary,
+                  try activeLeaseCount(referenceID: id) == 0 else { return false }
+            let used = try db.rows("SELECT last_used_ms FROM reference_voices WHERE id=?", [.text(id)]).first?.first?.int ?? Int.max
+            guard used <= Int(idleBefore.timeIntervalSince1970 * 1000) else { return false }
+            try db.execute("DELETE FROM upload_consents WHERE reference_id=?", [.text(id)])
+            return try db.execute("DELETE FROM reference_voices WHERE id=?", [.text(id)]) == 1
+        }
     }
 
     /// Returns only after a FULL-synchronous COMMIT. A caller may then claim a queued
@@ -221,7 +260,7 @@ public actor StudioStore {
     public func cancelQueued(id: String) throws -> Bool {
         try db.transaction {
             guard try db.execute("UPDATE jobs SET state='cancelled' WHERE id=? AND state='queued'", [.text(id)]) == 1 else { return false }
-            try db.execute("DELETE FROM reference_leases WHERE job_id=?", [.text(id)])
+            try releaseReferenceRows(jobID: id)
             return true
         }
     }
@@ -235,14 +274,14 @@ public actor StudioStore {
         guard valid else { throw StudioStoreError.invalidTransition }
         return try db.transaction {
             let changed = try db.execute("UPDATE jobs SET state=?,message=? WHERE id=? AND state=?", [.text(to.rawValue), message.map { .text(Self.safeJobMessage($0)) } ?? .null, .text(id), .text(from.rawValue)]) == 1
-            if changed && to.isTerminal { try db.execute("DELETE FROM reference_leases WHERE job_id=?", [.text(id)]) }
+            if changed && to.isTerminal { try releaseReferenceRows(jobID: id) }
             return changed
         }
     }
     public func markResultUncertain(id: String, message: String) throws -> Bool {
         try db.transaction {
             let changed = try db.execute("UPDATE jobs SET state='interrupted',result_uncertain=1,message=? WHERE id=? AND state='requesting'", [.text(Self.safeJobMessage(message)), .text(id)]) == 1
-            if changed { try db.execute("DELETE FROM reference_leases WHERE job_id=?", [.text(id)]) }
+            if changed { try releaseReferenceRows(jobID: id) }
             return changed
         }
     }

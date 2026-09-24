@@ -37,15 +37,18 @@ final class OutputFolderController {
     private(set) var errorMessage: String?
     private(set) var isChoosing = false
     let directories: OutputDirectoryStore?
+    let referenceAudio: ReferenceAudioService?
     private let picker: any OutputFolderChoosing
-    init(directories: OutputDirectoryStore?, picker: any OutputFolderChoosing = OutputFolderPicker()) {
-        self.directories = directories; self.picker = picker
+    init(directories: OutputDirectoryStore?, picker: any OutputFolderChoosing = OutputFolderPicker(), referenceAudio: ReferenceAudioService? = nil) {
+        self.directories = directories; self.picker = picker; self.referenceAudio = referenceAudio
     }
     static func live() -> OutputFolderController {
         do {
             let root = try FileManager.default.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true)
                 .appendingPathComponent("QwenAudioStudioNative", isDirectory: true)
-            return OutputFolderController(directories: OutputDirectoryStore(store: try StudioStore(dataRoot: root)))
+            let store = try StudioStore(dataRoot: root)
+            let audio = try ReferenceAudioService(root: root.appendingPathComponent("ReferenceAudio"), store: store)
+            return OutputFolderController(directories: OutputDirectoryStore(store: store), referenceAudio: audio)
         } catch {
             let controller = OutputFolderController(directories: nil)
             controller.errorMessage = "本地作品库暂不可用。请关闭其他应用实例后重试。"
