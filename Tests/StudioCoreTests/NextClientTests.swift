@@ -39,8 +39,44 @@ private final class RecordingProtocol: URLProtocol, @unchecked Sendable {
     static func capturedBodies() -> [Data] { lock.lock(); defer { lock.unlock() }; return bodies }
 }
 
+private final class RedirectingProtocol: URLProtocol, @unchecked Sendable {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var seenSchemes: [String] = []
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        Self.lock.lock(); Self.seenSchemes.append(request.url?.scheme ?? ""); Self.lock.unlock()
+        let url = request.url!
+        if url.scheme == "https" {
+            let target = URL(string: "http://insecure.example.invalid/audio.wav?signature=synthetic")!
+            let response = HTTPURLResponse(url: url, statusCode: 302, httpVersion: nil,
+                                           headerFields: ["Location": target.absoluteString])!
+            client?.urlProtocol(self, wasRedirectedTo: URLRequest(url: target), redirectResponse: response)
+            client?.urlProtocolDidFinishLoading(self)
+        } else {
+            let response = HTTPURLResponse(url: url, statusCode: 200, httpVersion: nil, headerFields: nil)!
+            client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
+            client?.urlProtocol(self, didLoad: Data("synthetic".utf8))
+            client?.urlProtocolDidFinishLoading(self)
+        }
+    }
+    override func stopLoading() {}
+    static func reset() { lock.lock(); seenSchemes = []; lock.unlock() }
+    static func schemes() -> [String] { lock.lock(); defer { lock.unlock() }; return seenSchemes }
+}
+
 private struct TestCredentials: CredentialProviding {
     func load() throws -> NativeCredentials { NativeCredentials(apiKey: "synthetic-secret", workspaceID: "synthetic-workspace") }
+}
+
+private final class FaultyKeychainItems: KeychainItemAccess, @unchecked Sendable {
+    var values: [String: String] = [:]
+    var failedReads: Set<String> = []
+    func read(service: String, account: String) throws -> String? {
+        if failedReads.contains(service) { throw CredentialError.keychainFailure }
+        return values[service]
+    }
+    func write(_ value: String, service: String, account: String) throws { values[service] = value }
 }
 
 @Suite(.serialized) struct NextClientTests {
@@ -95,9 +131,7 @@ private struct TestCredentials: CredentialProviding {
             attempts.record(request.httpMethod ?? "")
             return (503, Data(#"{"message":"https://signed.invalid/a?private=signature"}"#.utf8))
         }
-        let config = URLSessionConfiguration.ephemeral
-        config.protocolClasses = [RecordingProtocol.self]
-        let downloader = NextAudioDownloader(session: URLSession(configuration: config))
+        let downloader = NextAudioDownloader(protocolClasses: [RecordingProtocol.self])
         let receipt = ProviderResponseSnapshot(providerRequestID: "synthetic", audioURL: URL(string: "https://signed.invalid/a?private=signature")!)
         do { _ = try await downloader.download(receipt); Issue.record("Expected GET failure") }
         catch {
@@ -105,6 +139,40 @@ private struct TestCredentials: CredentialProviding {
             #expect(!error.localizedDescription.contains("signature"))
             #expect(!String(describing: error).contains("signed.invalid"))
         }
+    }
+
+    @Test func signedDownloadRedirectPolicyRejectsHTTPAndNonGET() throws {
+        let session = URLSession(configuration: .ephemeral)
+        let source = URL(string: "https://redirect.example.invalid/audio.wav?signature=synthetic")!
+        var original = URLRequest(url: source); original.httpMethod = "GET"
+        let task = session.dataTask(with: original)
+        let response = HTTPURLResponse(url: source, statusCode: 302, httpVersion: nil, headerFields: nil)!
+        let policy = SecureDownloadRedirects()
+        var accepted: URLRequest?
+        var didComplete = false
+        policy.urlSession(session, task: task, willPerformHTTPRedirection: response,
+                          newRequest: URLRequest(url: URL(string: "http://insecure.example.invalid/audio.wav")!)) {
+            accepted = $0; didComplete = true
+        }
+        #expect(didComplete && accepted == nil)
+        var post = URLRequest(url: URL(string: "https://safe.example.invalid/audio.wav")!); post.httpMethod = "POST"
+        didComplete = false
+        policy.urlSession(session, task: task, willPerformHTTPRedirection: response, newRequest: post) {
+            accepted = $0; didComplete = true
+        }
+        #expect(didComplete && accepted == nil)
+        let safe = URLRequest(url: URL(string: "https://safe.example.invalid/audio.wav")!)
+        policy.urlSession(session, task: task, willPerformHTTPRedirection: response, newRequest: safe) { accepted = $0 }
+        #expect(accepted?.url == safe.url)
+    }
+
+    @Test func redirectFixtureProvesBaselineSessionWouldFollowHTTP() async throws {
+        RedirectingProtocol.reset()
+        let config = URLSessionConfiguration.ephemeral
+        config.protocolClasses = [RedirectingProtocol.self]
+        let session = URLSession(configuration: config)
+        _ = try? await session.data(from: URL(string: "https://redirect.example.invalid/audio.wav?signature=synthetic")!)
+        #expect(RedirectingProtocol.schemes().contains("http"))
     }
 
     @Test func disposableNativeKeychainItemRoundTripsAndDeletes() throws {
@@ -133,6 +201,19 @@ private struct TestCredentials: CredentialProviding {
         #expect(delete(prefix + ".APIKey") == errSecSuccess)
         #expect(delete(prefix + ".WorkspaceID") == errSecSuccess)
         #expect(throws: CredentialError.missing) { try store.load() }
+    }
+
+    @Test func legacyImportKeepsFirstFieldWhenSecondReadFailsAndPreservesNativeOtherField() throws {
+        let access = FaultyKeychainItems()
+        access.values["QwenAudioStudio.DashScopeAPIKey"] = "synthetic-legacy-key"
+        access.values[NativeCredentialStore.workspaceService] = "native-workspace"
+        access.failedReads.insert("QwenAudioStudio.WorkspaceID")
+        let store = NativeCredentialStore(account: "synthetic", servicePrefix: "QwenAudioStudio.Native", items: access)
+        let result = try store.importLegacy()
+        #expect(result.apiKey)
+        #expect(!result.workspaceID && result.failed)
+        #expect(try store.load().apiKey == "synthetic-legacy-key")
+        #expect(try store.load().workspaceID == "native-workspace")
     }
 
     @Test func legacyPrivateReceiptDecodesWithBoundedExpiry() throws {

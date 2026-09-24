@@ -1,19 +1,20 @@
 import Foundation
 import Testing
+import CryptoKit
 @testable import StudioCore
 
 private actor FakeSynthesizer: SynthesizerClient {
     private(set) var seeds: [Int] = []
     var shouldFail = false
-    var onCall: (@Sendable () -> Void)?
+    var onCall: (@Sendable () async -> Void)?
     func synthesize(_ request: CompiledRequest) async throws -> ProviderOutput {
         seeds.append(request.seed)
-        onCall?()
+        await onCall?()
         if shouldFail { throw URLError(.timedOut, userInfo: [NSURLErrorFailingURLErrorKey: URL(string: "https://signed.invalid/audio?private=signature")!]) }
         return ProviderOutput(receipt: ProviderResponseSnapshot(providerRequestID: "synthetic-id", audioURL: URL(string: "https://audio.example.invalid/a.wav")!, expiresAt: Date().addingTimeInterval(3600)))
     }
     func setFailing(_ value: Bool) { shouldFail = value }
-    func setOnCall(_ callback: @escaping @Sendable () -> Void) { onCall = callback }
+    func setOnCall(_ callback: @escaping @Sendable () async -> Void) { onCall = callback }
     func calls() -> [Int] { seeds }
 }
 
@@ -46,6 +47,36 @@ struct GenerationServiceTests {
         try await store.close()
     }
 
+    @Test func preflightHashAloneCannotAuthorizePaidSubmit() async throws {
+        let (root, store, dirs, _, fake, service) = try fixture(); defer { try? FileManager.default.removeItem(at: root) }
+        let request = try await input(root, store, dirs)
+        let preview = try await service.preflight(request)
+        await #expect(throws: GenerationError.confirmationMismatch) {
+            try await service.submit(preview, confirmedHash: preview.confirmationHash, clientRequestID: request.clientRequestID)
+        }
+        #expect(await fake.calls().isEmpty)
+        #expect(try await store.listLibrary().isEmpty)
+        try await store.close()
+    }
+
+    @Test func uploadConsentStartsAtExplicitConfirmationAfterLongPreview() async throws {
+        let (root, store, dirs, assets, fake, _) = try fixture(); defer { try? FileManager.default.removeItem(at: root) }
+        let clock = TestClock(initialOffset: -601)
+        let service = GenerationService(store: store, directories: dirs, assets: assets, synthesizer: fake,
+                                        downloader: FakeAudioDownloader(), now: { clock.date })
+        let request = try await input(root, store, dirs)
+        let preview = try await service.preflight(request)
+        clock.advance(by: 601)
+        let authorization = try await service.confirm(preview)
+        #expect(authorization.submission.consent.confirmed)
+        #expect(authorization.submission.consent.confirmedAt > preview.submission.consent.confirmedAt)
+        let batch = try await service.submit(preview, confirmedHash: authorization.confirmationHash,
+                                             clientRequestID: request.clientRequestID)
+        #expect(try await store.getJob(id: batch.jobIDs[0])?.state == .success)
+        #expect(await fake.calls().count == 1)
+        try await store.close()
+    }
+
     @Test func changedReferenceBytesFailPreflightBeforePaidPost() async throws {
         let (root, store, dirs, _, fake, service) = try fixture(); defer { try? FileManager.default.removeItem(at: root) }
         let base = try await input(root, store, dirs)
@@ -60,11 +91,49 @@ struct GenerationServiceTests {
         try await store.close()
     }
 
+    @Test func forgedTwoSecondSnapshotCannotUploadThirtyOneSecondWAV() async throws {
+        let (root, store, dirs, _, fake, service) = try fixture(); defer { try? FileManager.default.removeItem(at: root) }
+        let base = try await input(root, store, dirs)
+        let bytes = FakeAudioDownloader.wav(frames: 31 * 48_000)
+        let hash = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+        let reference = ReferenceSnapshot(id: "voice", contentHash: hash, fileName: "synthetic-long.wav", duration: 2)
+        let project = try await store.saveProject(id: base.project.id, expectedRevision: 1,
+            changes: DraftFields(prompt: "@voice1 测试", referenceBindings: [ReferenceBinding(referenceID: "voice", alias: "讲述者", slot: 1)], outputDirectoryID: base.directory.id))
+        let request = GenerationInput(clientRequestID: "long-reference", project: project, directory: base.directory,
+                                      candidateCount: 1, references: [reference],
+                                      preparedReferences: [PreparedReference(snapshot: reference, mimeType: "audio/wav", data: bytes)])
+        await #expect(throws: GenerationError.referenceUnavailable) { try await service.preflight(request) }
+        #expect(await fake.calls().isEmpty)
+        try await store.close()
+    }
+
+    @Test func verifiedTwoSecondMonoPCM16WAVCanReachFakeProvider() async throws {
+        let (root, store, dirs, _, fake, service) = try fixture(); defer { try? FileManager.default.removeItem(at: root) }
+        let base = try await input(root, store, dirs)
+        let bytes = FakeAudioDownloader.wav(frames: 2 * 48_000)
+        let hash = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+        let reference = ReferenceSnapshot(id: "voice", contentHash: hash, fileName: "synthetic-two-seconds.wav", duration: 2)
+        try await store.saveReference(reference)
+        let project = try await store.saveProject(id: base.project.id, expectedRevision: 1,
+            changes: DraftFields(prompt: "@voice1 测试", referenceBindings: [ReferenceBinding(referenceID: "voice", alias: "讲述者", slot: 1)], outputDirectoryID: base.directory.id))
+        let request = GenerationInput(clientRequestID: "valid-reference", project: project, directory: base.directory,
+                                      candidateCount: 1, references: [reference],
+                                      preparedReferences: [PreparedReference(snapshot: reference, mimeType: "audio/wav", data: bytes)])
+        let plan = try await service.preflight(request)
+        let authorization = try await service.confirm(plan)
+        let batch = try await service.submit(plan, confirmedHash: authorization.confirmationHash,
+                                             clientRequestID: request.clientRequestID)
+        #expect(try await store.getJob(id: batch.jobIDs[0])?.state == .success)
+        #expect(await fake.calls().count == 1)
+        try await store.close()
+    }
+
     @Test func twoCandidatesTwoDistinctSeedsAndDuplicateNonceNoExtraPost() async throws {
         let (root, store, dirs, _, fake, service) = try fixture(); defer { try? FileManager.default.removeItem(at: root) }
         let request = try await input(root, store, dirs, candidates: 2)
         let plan = try await service.preflight(request)
-        let batch = try await service.submit(plan, confirmedHash: plan.confirmationHash, clientRequestID: request.clientRequestID)
+        let authorization = try await service.confirm(plan)
+        let batch = try await service.submit(plan, confirmedHash: authorization.confirmationHash, clientRequestID: request.clientRequestID)
         #expect(await fake.calls().count == 2)
         #expect(Set(await fake.calls()).count == 2)
         for id in batch.jobIDs {
@@ -73,11 +142,11 @@ struct GenerationServiceTests {
             #expect(Set(assets.map(\.kind)) == ["audio", "prompt", "report"])
             for asset in assets { #expect(FileManager.default.fileExists(atPath: root.appendingPathComponent("output").appendingPathComponent(asset.relativePath).path)) }
         }
-        #expect(try await service.submit(plan, confirmedHash: plan.confirmationHash, clientRequestID: request.clientRequestID).id == batch.id)
+        #expect(try await service.submit(plan, confirmedHash: authorization.confirmationHash, clientRequestID: request.clientRequestID).id == batch.id)
         #expect(await fake.calls().count == 2)
         var changed = request; changed.candidateCount = 1
         let changedPlan = try await service.preflight(changed)
-        await #expect(throws: StudioStoreError.requestConflict) { try await service.submit(changedPlan, confirmedHash: changedPlan.confirmationHash, clientRequestID: request.clientRequestID) }
+        await #expect(throws: StudioStoreError.requestConflict) { try await service.confirm(changedPlan) }
         try await store.close()
     }
 
@@ -86,13 +155,14 @@ struct GenerationServiceTests {
         await fake.setFailing(true)
         let request = try await input(root, store, dirs)
         let plan = try await service.preflight(request)
-        let batch = try await service.submit(plan, confirmedHash: plan.confirmationHash, clientRequestID: request.clientRequestID)
+        let authorization = try await service.confirm(plan)
+        let batch = try await service.submit(plan, confirmedHash: authorization.confirmationHash, clientRequestID: request.clientRequestID)
         let job = try #require(try await store.getJob(id: batch.jobIDs[0]))
         #expect(job.resultUncertain)
         #expect(job.state == .interrupted)
         #expect(!String(describing: job).contains("signature"))
         #expect(try await service.cancelQueued(job.id) == false)
-        _ = try await service.submit(plan, confirmedHash: plan.confirmationHash, clientRequestID: request.clientRequestID)
+        _ = try await service.submit(plan, confirmedHash: authorization.confirmationHash, clientRequestID: request.clientRequestID)
         #expect(await fake.calls().count == 1)
         try await store.close()
     }
@@ -103,7 +173,8 @@ struct GenerationServiceTests {
                                     downloader: FakeAudioDownloader(corrupt: true))
         let request = try await input(root, store, dirs)
         let plan = try await bad.preflight(request)
-        let batch = try await bad.submit(plan, confirmedHash: plan.confirmationHash, clientRequestID: request.clientRequestID)
+        let authorization = try await bad.confirm(plan)
+        let batch = try await bad.submit(plan, confirmedHash: authorization.confirmationHash, clientRequestID: request.clientRequestID)
         let id = batch.jobIDs[0]
         #expect(try await store.getJob(id: id)?.state == .failed)
         #expect(try await store.providerResponse(id: id) != nil)
@@ -119,7 +190,8 @@ struct GenerationServiceTests {
         let (root, store, dirs, assets, fake, service) = try fixture(); defer { try? FileManager.default.removeItem(at: root) }
         let request = try await input(root, store, dirs)
         let plan = try await service.preflight(request)
-        let batch = try await store.createBatch(plan.submission)
+        let authorization = try await service.confirm(plan)
+        let batch = try await store.createBatch(authorization.submission)
         let id = batch.jobIDs[0]
         _ = try await store.claimJob(id: id)
         let lease = try await dirs.resolveForJob(id, directoryID: request.directory.id)
@@ -155,10 +227,47 @@ struct GenerationServiceTests {
                                         downloader: FakeAudioDownloader(), now: { clock.date })
         let request = try await input(root, store, dirs, candidates: 2)
         let plan = try await service.preflight(request)
-        let batch = try await service.submit(plan, confirmedHash: plan.confirmationHash, clientRequestID: request.clientRequestID)
+        let authorization = try await service.confirm(plan)
+        let batch = try await service.submit(plan, confirmedHash: authorization.confirmationHash, clientRequestID: request.clientRequestID)
         #expect(await fake.calls().count == 1)
         #expect(try await store.getJob(id: batch.jobIDs[0])?.state == .success)
         #expect(try await store.getJob(id: batch.jobIDs[1])?.state == .failed)
+        try await store.close()
+    }
+
+    @Test func cancellingBatchDuringFirstPaidCallPreventsLaterPosts() async throws {
+        let (root, store, dirs, assets, fake, _) = try fixture(); defer { try? FileManager.default.removeItem(at: root) }
+        let service = GenerationService(store: store, directories: dirs, assets: assets, synthesizer: fake,
+                                        downloader: FakeAudioDownloader())
+        await fake.setOnCall {
+            if let batchID = try? await store.listLibrary().first?.batchID {
+                _ = try? await service.cancelBatch(batchID: batchID)
+            }
+        }
+        let request = try await input(root, store, dirs, candidates: 3)
+        let plan = try await service.preflight(request)
+        let authorization = try await service.confirm(plan)
+        let batch = try await service.submit(plan, confirmedHash: authorization.confirmationHash, clientRequestID: request.clientRequestID)
+        #expect(await fake.calls().count == 1)
+        #expect(try await store.getJob(id: batch.jobIDs[0])?.state == .success)
+        #expect(try await store.getJob(id: batch.jobIDs[1])?.state == .cancelled)
+        #expect(try await store.getJob(id: batch.jobIDs[2])?.state == .cancelled)
+        try await store.close()
+    }
+
+    @Test func cancellingSubmitTaskDuringFirstCallStopsQueuedCandidates() async throws {
+        let (root, store, dirs, assets, fake, _) = try fixture(); defer { try? FileManager.default.removeItem(at: root) }
+        let service = GenerationService(store: store, directories: dirs, assets: assets, synthesizer: fake,
+                                        downloader: FakeAudioDownloader())
+        await fake.setOnCall { withUnsafeCurrentTask { $0?.cancel() } }
+        let request = try await input(root, store, dirs, candidates: 3)
+        let plan = try await service.preflight(request)
+        let authorization = try await service.confirm(plan)
+        let batch = try await service.submit(plan, confirmedHash: authorization.confirmationHash, clientRequestID: request.clientRequestID)
+        #expect(await fake.calls().count == 1)
+        #expect(try await store.getJob(id: batch.jobIDs[0])?.state == .success)
+        #expect(try await store.getJob(id: batch.jobIDs[1])?.state == .cancelled)
+        #expect(try await store.getJob(id: batch.jobIDs[2])?.state == .cancelled)
         try await store.close()
     }
 
@@ -166,7 +275,8 @@ struct GenerationServiceTests {
         let (root, store, dirs, _, _, service) = try fixture(); defer { try? FileManager.default.removeItem(at: root) }
         let request = try await input(root, store, dirs)
         let plan = try await service.preflight(request)
-        let batch = try await store.createBatch(plan.submission)
+        let authorization = try await service.confirm(plan)
+        let batch = try await store.createBatch(authorization.submission)
         let id = batch.jobIDs[0]
         _ = try await store.claimJob(id: id)
         #expect(try await store.transitionJob(id: id, from: .preparing, to: .requesting))
@@ -181,11 +291,12 @@ struct GenerationServiceTests {
         let (root, store, dirs, _, fake, service) = try fixture(); defer { try? FileManager.default.removeItem(at: root) }
         let request = try await input(root, store, dirs)
         let plan = try await service.preflight(request)
-        let batch = try await store.createBatch(plan.submission)
+        let authorization = try await service.confirm(plan)
+        let batch = try await store.createBatch(authorization.submission)
         let id = batch.jobIDs[0]
         #expect(try await service.cancelQueued(id))
         #expect(try await store.getJob(id: id)?.state == .cancelled)
-        _ = try await service.submit(plan, confirmedHash: plan.confirmationHash, clientRequestID: request.clientRequestID)
+        _ = try await service.submit(plan, confirmedHash: authorization.confirmationHash, clientRequestID: request.clientRequestID)
         #expect(await fake.calls().isEmpty)
         try await store.close()
     }
@@ -193,7 +304,8 @@ struct GenerationServiceTests {
 
 private final class TestClock: @unchecked Sendable {
     private let lock = NSLock()
-    private var offset: TimeInterval = 0
+    private var offset: TimeInterval
+    init(initialOffset: TimeInterval = 0) { offset = initialOffset }
     var date: Date { lock.lock(); defer { lock.unlock() }; return Date().addingTimeInterval(offset) }
     func advance(by seconds: TimeInterval) { lock.lock(); offset += seconds; lock.unlock() }
 }
@@ -202,7 +314,10 @@ private struct FakeAudioDownloader: AudioDownloading {
     var corrupt = false
     func download(_ receipt: ProviderResponseSnapshot) async throws -> Data {
         guard !corrupt else { return Data("invalid".utf8) }
-        let frames = 4_800, channels = 2, sampleRate = 48_000
+        return Self.wav(frames: 4_800, channels: 2)
+    }
+    static func wav(frames: Int, channels: Int = 1) -> Data {
+        let sampleRate = 48_000
         let bytes = frames * channels * 2
         var result = Data()
         func word<T: FixedWidthInteger>(_ number: T) { var little = number.littleEndian; withUnsafeBytes(of: &little) { result.append(contentsOf: $0) } }

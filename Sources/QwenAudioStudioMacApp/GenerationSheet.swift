@@ -6,9 +6,11 @@ import StudioCore
 struct GenerationSheet: View {
     let plan: GenerationPlan
     let directoryName: String
+    let service: GenerationService
     let onConfirm: (String, String) -> Void
     let onCancel: () -> Void
     @State private var chargeAcknowledged = false
+    @State private var confirmationError: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 15) {
@@ -32,10 +34,18 @@ struct GenerationSheet: View {
             .padding(10)
             .background(.quaternary.opacity(0.4), in: RoundedRectangle(cornerRadius: 8))
             Toggle("我已核对以上内容，了解每个候选可能产生费用", isOn: $chargeAcknowledged)
+            if let confirmationError { Text(confirmationError).foregroundStyle(.red).font(.caption) }
             HStack {
                 Spacer()
                 Button("取消", action: onCancel)
-                Button("确认并生成") { onConfirm(plan.confirmationHash, plan.submission.clientRequestID) }
+                Button("确认并生成") {
+                    Task {
+                        do {
+                            let authorization = try await service.confirm(plan)
+                            onConfirm(authorization.confirmationHash, authorization.clientRequestID)
+                        } catch { confirmationError = "确认内容已变化，请重新预检。" }
+                    }
+                }
                     .buttonStyle(.borderedProminent)
                     .disabled(!chargeAcknowledged)
             }

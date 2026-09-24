@@ -26,6 +26,41 @@ public protocol CredentialProviding: Sendable {
     func load() throws -> NativeCredentials
 }
 
+protocol KeychainItemAccess: Sendable {
+    func read(service: String, account: String) throws -> String?
+    func write(_ value: String, service: String, account: String) throws
+}
+
+private struct SystemKeychainItems: KeychainItemAccess {
+    private func query(_ service: String, account: String) -> [String: Any] {
+        [kSecClass as String: kSecClassGenericPassword,
+         kSecAttrService as String: service,
+         kSecAttrAccount as String: account]
+    }
+    func read(service: String, account: String) throws -> String? {
+        var q = query(service, account: account)
+        q[kSecReturnData as String] = true
+        q[kSecMatchLimit as String] = kSecMatchLimitOne
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(q as CFDictionary, &result)
+        if status == errSecItemNotFound { return nil }
+        guard status == errSecSuccess, let data = result as? Data,
+              let value = String(data: data, encoding: .utf8) else { throw CredentialError.keychainFailure }
+        return value
+    }
+    func write(_ value: String, service: String, account: String) throws {
+        let data = Data(value.utf8)
+        let status = SecItemUpdate(query(service, account: account) as CFDictionary,
+                                   [kSecValueData as String: data] as CFDictionary)
+        if status == errSecSuccess { return }
+        guard status == errSecItemNotFound else { throw CredentialError.keychainFailure }
+        var q = query(service, account: account)
+        q[kSecValueData as String] = data
+        q[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        guard SecItemAdd(q as CFDictionary, nil) == errSecSuccess else { throw CredentialError.keychainFailure }
+    }
+}
+
 /// Native items are independent, so editing one field never removes the other.
 public struct NativeCredentialStore: CredentialProviding {
     public static let apiKeyService = "QwenAudioStudio.Native.APIKey"
@@ -35,12 +70,19 @@ public struct NativeCredentialStore: CredentialProviding {
     private let account: String
     private let apiKeyService: String
     private let workspaceService: String
+    private let items: any KeychainItemAccess
 
     public init(account: String = NSUserName()) {
         self.account = account; self.apiKeyService = Self.apiKeyService; self.workspaceService = Self.workspaceService
+        self.items = SystemKeychainItems()
     }
     init(account: String, servicePrefix: String) {
         self.account = account; self.apiKeyService = servicePrefix + ".APIKey"; self.workspaceService = servicePrefix + ".WorkspaceID"
+        self.items = SystemKeychainItems()
+    }
+    init(account: String, servicePrefix: String, items: any KeychainItemAccess) {
+        self.account = account; self.apiKeyService = servicePrefix + ".APIKey"; self.workspaceService = servicePrefix + ".WorkspaceID"
+        self.items = items
     }
 
     public func load() throws -> NativeCredentials {
@@ -64,17 +106,19 @@ public struct NativeCredentialStore: CredentialProviding {
 
     /// Called only from an explicit Settings action. Legacy items are read only.
     public func importLegacy() throws -> (apiKey: Bool, workspaceID: Bool, failed: Bool) {
-        let oldKey = try read(Self.legacyAPIKeyService)
-        let oldWorkspace = try read(Self.legacyWorkspaceService)
         var importedKey = false, importedWorkspace = false, failed = false
-        if let oldKey, !oldKey.isEmpty {
-            do { try saveAPIKey(oldKey); importedKey = true } catch { failed = true }
-        } else if oldKey != nil { failed = true }
-        if let oldWorkspace {
-            if Self.validWorkspaceID(oldWorkspace) {
-                do { try saveWorkspaceID(oldWorkspace); importedWorkspace = true } catch { failed = true }
-            } else { failed = true }
-        }
+        do {
+            if let oldKey = try read(Self.legacyAPIKeyService) {
+                if oldKey.isEmpty { failed = true }
+                else { do { try saveAPIKey(oldKey); importedKey = true } catch { failed = true } }
+            }
+        } catch { failed = true }
+        do {
+            if let oldWorkspace = try read(Self.legacyWorkspaceService) {
+                if !Self.validWorkspaceID(oldWorkspace) { failed = true }
+                else { do { try saveWorkspaceID(oldWorkspace); importedWorkspace = true } catch { failed = true } }
+            }
+        } catch { failed = true }
         return (importedKey, importedWorkspace, failed)
     }
 
@@ -84,29 +128,10 @@ public struct NativeCredentialStore: CredentialProviding {
         } && value.first != "-" && value.last != "-"
     }
 
-    private func query(_ service: String) -> [String: Any] {
-        [kSecClass as String: kSecClassGenericPassword,
-         kSecAttrService as String: service,
-         kSecAttrAccount as String: account]
-    }
     private func read(_ service: String) throws -> String? {
-        var q = query(service)
-        q[kSecReturnData as String] = true
-        q[kSecMatchLimit as String] = kSecMatchLimitOne
-        var result: CFTypeRef?
-        let status = SecItemCopyMatching(q as CFDictionary, &result)
-        if status == errSecItemNotFound { return nil }
-        guard status == errSecSuccess, let data = result as? Data, let value = String(data: data, encoding: .utf8) else { throw CredentialError.keychainFailure }
-        return value
+        try items.read(service: service, account: account)
     }
     private func write(_ value: String, service: String) throws {
-        let data = Data(value.utf8)
-        let status = SecItemUpdate(query(service) as CFDictionary, [kSecValueData as String: data] as CFDictionary)
-        if status == errSecSuccess { return }
-        guard status == errSecItemNotFound else { throw CredentialError.keychainFailure }
-        var q = query(service)
-        q[kSecValueData as String] = data
-        q[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
-        guard SecItemAdd(q as CFDictionary, nil) == errSecSuccess else { throw CredentialError.keychainFailure }
+        try items.write(value, service: service, account: account)
     }
 }
