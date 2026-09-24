@@ -6,7 +6,11 @@ import StudioCore
 @main
 struct QwenAudioStudioMacApp: App {
     @State private var preferences: StudioPreferences
+    @State private var outputFolders: OutputFolderController
     init() {
+        if let argument = ProcessInfo.processInfo.arguments.first(where: { $0.hasPrefix("--verify-folder-dialog-root=") }) {
+            NativeOutputFolderQA.run(root: URL(fileURLWithPath: String(argument.dropFirst("--verify-folder-dialog-root=".count)), isDirectory: true))
+        }
         if ProcessInfo.processInfo.arguments.contains("--verify-templates") {
             do {
                 let engine = try TemplateEngine()
@@ -20,6 +24,8 @@ struct QwenAudioStudioMacApp: App {
         }
         // Captures always use isolated preferences and the synthetic, in-memory draft.
         let capture = ProcessInfo.processInfo.arguments.contains { $0.hasPrefix("--capture-ui=") }
+        let folders = capture ? OutputFolderController(directories: nil) : OutputFolderController.live()
+        _outputFolders = State(initialValue: folders)
         let store: any StudioPreferenceStore = capture
             ? CapturePreferenceStore() : UserDefaultsPreferenceStore(defaults: .standard)
         let initialPreferences = StudioPreferences(store: store)
@@ -38,6 +44,8 @@ struct QwenAudioStudioMacApp: App {
         WindowGroup("Qwen Audio Studio") {
             AppShell()
                 .environment(preferences)
+                .environment(outputFolders)
+                .task { await outputFolders.loadDefault() }
                 .preferredColorScheme(preferences.appearance.colorScheme)
                 .frame(minWidth: CGFloat(StudioLayout.minWidth),
                        minHeight: CGFloat(StudioLayout.minHeight - 52))
@@ -53,6 +61,7 @@ struct QwenAudioStudioMacApp: App {
         Settings {
             SettingsScreen()
                 .environment(preferences)
+                .environment(outputFolders)
                 .preferredColorScheme(preferences.appearance.colorScheme)
         }
     }
@@ -68,6 +77,7 @@ struct QwenAudioStudioMacApp: App {
         window.title = "Qwen Audio Studio"
         window.minSize = NSSize(width: StudioLayout.minWidth, height: StudioLayout.minHeight)
         window.contentView = NSHostingView(rootView: AppShell(qaMode: true).environment(preferences)
+            .environment(OutputFolderController(directories: nil))
             .preferredColorScheme(preferences.appearance.colorScheme))
         window.center()
         window.makeKeyAndOrderFront(nil)

@@ -3,8 +3,8 @@ import Foundation
 enum StudioSchema {
     static func migrate(_ db: SQLiteConnection) throws {
         let version = try db.rows("PRAGMA user_version").first?.first?.int ?? 0
-        guard version <= 1 else { throw StudioStoreError.unsupportedSchema(version) }
-        guard version == 0 else { return }
+        guard version <= 2 else { throw StudioStoreError.unsupportedSchema(version) }
+        if version == 0 {
         try db.transaction {
             for statement in [
                 "CREATE TABLE projects (id TEXT PRIMARY KEY NOT NULL, revision INTEGER NOT NULL CHECK(revision > 0), fields BLOB NOT NULL)",
@@ -21,6 +21,18 @@ enum StudioSchema {
                 "CREATE TABLE template_favorites (template_id TEXT PRIMARY KEY NOT NULL REFERENCES templates(id) ON DELETE CASCADE)",
                 "PRAGMA user_version = 1"
             ] { try db.execute(statement) }
+        }
+        }
+        if version < 2 {
+            try db.transaction {
+                for statement in [
+                    "CREATE TABLE output_settings (singleton INTEGER PRIMARY KEY CHECK(singleton=1), default_directory_id TEXT REFERENCES directories(id))",
+                    "CREATE TABLE job_output_folders (job_id TEXT PRIMARY KEY NOT NULL REFERENCES jobs(id), directory_id TEXT NOT NULL REFERENCES directories(id), relative_path TEXT NOT NULL, identity BLOB NOT NULL, UNIQUE(directory_id,relative_path))",
+                    "CREATE TABLE removed_jobs (job_id TEXT PRIMARY KEY NOT NULL REFERENCES jobs(id), scope TEXT NOT NULL CHECK(scope IN ('recordOnly','generatedFiles')))",
+                    "CREATE TABLE recycled_assets (asset_id TEXT PRIMARY KEY NOT NULL REFERENCES assets(id), original_path TEXT NOT NULL)",
+                    "PRAGMA user_version = 2"
+                ] { try db.execute(statement) }
+            }
         }
     }
 }

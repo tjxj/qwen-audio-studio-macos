@@ -2,6 +2,7 @@ import SwiftUI
 
 struct SettingsScreen: View {
     @Environment(StudioPreferences.self) private var preferences
+    @Environment(OutputFolderController.self) private var outputFolders
     @State private var apiKey = ""
     @State private var workspaceID = ""
 
@@ -19,7 +20,15 @@ struct SettingsScreen: View {
             }
 
             Section("文件与存储") {
-                LabeledContent("默认输出目录", value: "尚未选择")
+                LabeledContent("默认输出目录") {
+                    Text(outputFolders.defaultName).lineLimit(1)
+                    Button("选择…") { Task { await outputFolders.chooseDefault() } }
+                        .disabled(outputFolders.directories == nil || outputFolders.isChoosing)
+                    if let id = outputFolders.defaultID {
+                        Button("在 Finder 显示") { Task { await outputFolders.revealDirectory(id) } }
+                    }
+                }
+                if let message = outputFolders.errorMessage { Text(message).font(.caption).foregroundStyle(.red) }
                 LabeledContent("本地作品库", value: "尚未初始化")
             }
 

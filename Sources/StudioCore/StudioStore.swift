@@ -69,6 +69,38 @@ public actor StudioStore {
     public func getDirectory(id: String) throws -> DirectorySnapshot? {
         try db.rows("SELECT snapshot FROM directories WHERE id=?", [.text(id)]).first.map { try storeDecode(DirectorySnapshot.self, $0[0]) }
     }
+    public func setDefaultDirectory(id: String) throws {
+        guard try getDirectory(id: id) != nil else { throw StudioStoreError.missing }
+        try db.execute("INSERT INTO output_settings(singleton,default_directory_id) VALUES(1,?) ON CONFLICT(singleton) DO UPDATE SET default_directory_id=excluded.default_directory_id", [.text(id)])
+    }
+    public func defaultDirectoryID() throws -> String? {
+        try db.rows("SELECT default_directory_id FROM output_settings WHERE singleton=1").first?.first?.string
+    }
+    public func jobOutputFolder(jobID: String) throws -> JobOutputFolder? {
+        guard let row = try db.rows("SELECT directory_id,relative_path,identity FROM job_output_folders WHERE job_id=?", [.text(jobID)]).first,
+              let directory = row[0].string, let path = row[1].string else { return nil }
+        return JobOutputFolder(jobID: jobID, directoryID: directory, relativePath: path, identity: try storeDecode(FileIdentity.self, row[2]))
+    }
+    public func reserveJobOutputFolder(_ folder: JobOutputFolder) throws -> JobOutputFolder {
+        guard Self.safeRelativePath(folder.relativePath) else { throw StudioStoreError.invalidPath }
+        return try db.transaction {
+            if let old = try jobOutputFolder(jobID: folder.jobID) { return old }
+            guard let job = try getJob(id: folder.jobID), let batch = try getBatch(id: job.batchID), batch.submission.directory.id == folder.directoryID else { throw StudioStoreError.staleDirectory }
+            try db.execute("INSERT INTO job_output_folders(job_id,directory_id,relative_path,identity) VALUES(?,?,?,?)", [.text(folder.jobID), .text(folder.directoryID), .text(folder.relativePath), .blob(try storeEncode(folder.identity))])
+            return folder
+        }
+    }
+    public func removeJobRecord(id: String, scope: AssetRemovalScope) throws {
+        guard let job = try getJob(id: id), job.state.isTerminal else { throw StudioStoreError.invalidTransition }
+        try db.execute("INSERT INTO removed_jobs(job_id,scope) VALUES(?,?) ON CONFLICT(job_id) DO UPDATE SET scope=excluded.scope", [.text(id), .text(scope.rawValue)])
+    }
+    public func restoreJobRecord(id: String) throws { try db.execute("DELETE FROM removed_jobs WHERE job_id=?", [.text(id)]) }
+    public func originalAssetPath(id: String) throws -> String? {
+        try db.rows("SELECT original_path FROM recycled_assets WHERE asset_id=?", [.text(id)]).first?.first?.string
+    }
+    public func getAsset(id: String) throws -> StoredAsset? {
+        try db.rows("SELECT metadata FROM assets WHERE id=?", [.text(id)]).first.map { try storeDecode(StoredAsset.self, $0[0]) }
+    }
     public func saveReference(_ reference: ReferenceSnapshot) throws {
         guard !reference.id.isEmpty, !reference.contentHash.isEmpty, reference.duration.isFinite,
               reference.duration > 0, reference.duration <= 30 else { throw StudioStoreError.staleReference }
@@ -158,7 +190,10 @@ public actor StudioStore {
         try db.rows("SELECT \(Self.jobColumns) FROM jobs WHERE id=?", [.text(id)]).first.map(job)
     }
     public func listLibrary() throws -> [StoredJob] {
-        try db.rows("SELECT \(Self.jobColumns) FROM jobs ORDER BY rowid DESC").map(job)
+        try db.rows("SELECT \(Self.jobColumns) FROM jobs WHERE id NOT IN (SELECT job_id FROM removed_jobs) ORDER BY rowid DESC").map(job)
+    }
+    public func listRemovedJobs() throws -> [StoredJob] {
+        try db.rows("SELECT \(Self.jobColumns) FROM jobs WHERE id IN (SELECT job_id FROM removed_jobs) ORDER BY rowid DESC").map(job)
     }
     public func claimJob(id: String) throws -> StoredJob? {
         try db.transaction {
@@ -236,6 +271,9 @@ public actor StudioStore {
             guard asset.appOwned, asset.relativePath == operation.sourceRelativePath else { throw StudioStoreError.invalidPath }
             guard try db.rows("SELECT id FROM file_operations WHERE asset_id=? AND state='pending'", [.text(asset.id)]).isEmpty else { throw StudioStoreError.invalidTransition }
             try db.execute("INSERT INTO file_operations(id,asset_id,state,operation) VALUES(?,?,'pending',?)", [.text(operation.id), .text(operation.assetID), .blob(try storeEncode(operation))])
+            if operation.kind == .trash {
+                try db.execute("INSERT OR IGNORE INTO recycled_assets(asset_id,original_path) VALUES(?,?)", [.text(asset.id), .text(asset.relativePath)])
+            }
         }
     }
     public func pendingFileOperations() throws -> [FileOperation] {
@@ -248,8 +286,11 @@ public actor StudioStore {
             if error == nil {
                 guard let assetRow = try db.rows("SELECT metadata FROM assets WHERE id=?", [.text(operation.assetID)]).first else { throw StudioStoreError.missing }
                 let asset = try storeDecode(StoredAsset.self, assetRow[0])
-                let updated = StoredAsset(id: asset.id, jobID: asset.jobID, directoryID: asset.directoryID, relativePath: operation.destinationRelativePath, kind: asset.kind, appOwned: asset.appOwned)
+                let updated = StoredAsset(id: asset.id, jobID: asset.jobID, directoryID: asset.directoryID, relativePath: operation.destinationRelativePath, kind: asset.kind, appOwned: asset.appOwned, fileIdentity: asset.fileIdentity)
                 try db.execute("UPDATE assets SET metadata=? WHERE id=?", [.blob(try storeEncode(updated)), .text(asset.id)])
+            }
+            if (error == nil && operation.kind == .restore) || (error != nil && operation.kind == .trash) {
+                try db.execute("DELETE FROM recycled_assets WHERE asset_id=?", [.text(operation.assetID)])
             }
             try db.execute("UPDATE file_operations SET state=?,error=? WHERE id=?", [.text(error == nil ? "completed" : "failed"), error.map(SQLiteValue.text) ?? .null, .text(id)])
         }

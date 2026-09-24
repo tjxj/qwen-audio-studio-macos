@@ -97,10 +97,24 @@ public struct StoredAsset: Codable, Equatable, Sendable, Identifiable {
     public let relativePath: String
     public let kind: String
     public let appOwned: Bool
-    public init(id: String, jobID: String, directoryID: String, relativePath: String, kind: String, appOwned: Bool) {
+    public let fileIdentity: FileIdentity?
+    public init(id: String, jobID: String, directoryID: String, relativePath: String, kind: String, appOwned: Bool, fileIdentity: FileIdentity? = nil) {
         self.id = id; self.jobID = jobID; self.directoryID = directoryID; self.relativePath = relativePath
-        self.kind = kind; self.appOwned = appOwned
+        self.kind = kind; self.appOwned = appOwned; self.fileIdentity = fileIdentity
     }
+}
+
+/// File identity prevents a replaced path from becoming an application-owned file.
+public struct FileIdentity: Codable, Equatable, Sendable {
+    public let device: Int32
+    public let inode: UInt64
+    public init(device: Int32, inode: UInt64) { self.device = device; self.inode = inode }
+}
+public struct JobOutputFolder: Equatable, Sendable {
+    public let jobID: String
+    public let directoryID: String
+    public let relativePath: String
+    public let identity: FileIdentity
 }
 public struct FileOperation: Codable, Equatable, Sendable, Identifiable {
     public enum Kind: String, Codable, Sendable { case trash, restore }

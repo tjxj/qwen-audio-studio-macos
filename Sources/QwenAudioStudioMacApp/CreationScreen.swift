@@ -3,6 +3,8 @@ import StudioCore
 import AppKit
 
 struct CreationScreen: View {
+    @Environment(OutputFolderController.self) private var outputFolders
+    @State private var outputFolderName = "尚未选择输出目录"
     let draft: DraftController
     var sharedUndoManager: UndoManager? = nil
     @Environment(StudioPreferences.self) private var preferences
@@ -160,7 +162,26 @@ struct CreationScreen: View {
     private var footer: some View {
         HStack(spacing: 12) {
             VStack(alignment: .leading, spacing: 4) {
-                Label("尚未选择输出目录", systemImage: "folder")
+                HStack(spacing: 8) {
+                    Button { Task {
+                        let current = draft.fields.outputDirectoryID ?? outputFolders.defaultID
+                        if let id = await outputFolders.choose(currentID: current), id != current {
+                            draft.change { $0.outputDirectoryID = id }
+                            outputFolderName = (try? await outputFolders.name(for: id)) ?? "请重新授权输出目录"
+                        }
+                    } } label: { Label(outputFolderName, systemImage: "folder").lineLimit(1) }
+                        .disabled(outputFolders.directories == nil || outputFolders.isChoosing)
+                    if let id = draft.fields.outputDirectoryID ?? outputFolders.defaultID {
+                        Button { Task { await outputFolders.revealDirectory(id) } } label: { Image(systemName: "arrow.up.forward.square") }
+                            .help("在 Finder 显示")
+                    }
+                }
+                .task(id: draft.fields.outputDirectoryID ?? outputFolders.defaultID) {
+                    if let id = draft.fields.outputDirectoryID ?? outputFolders.defaultID {
+                        outputFolderName = (try? await outputFolders.name(for: id)) ?? "请重新授权输出目录"
+                    } else { outputFolderName = "尚未选择输出目录" }
+                }
+                if let message = outputFolders.errorMessage { Text(message).font(.caption).foregroundStyle(.red).lineLimit(2) }
                 Text("草稿暂存在内存，关闭应用后不保留。")
                     .font(.system(size: 10))
             }
