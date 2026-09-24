@@ -4,6 +4,7 @@ import StudioCore
 
 @MainActor @Observable
 final class AppState {
+    let dataRoot: URL
     let store: StudioStore
     let directories: OutputDirectoryStore
     let assets: GeneratedAssetStore
@@ -24,6 +25,7 @@ final class AppState {
 
     init(dataRoot: URL, synthesizer: any SynthesizerClient = NextClient(),
          batchCommitterFactory: ((StudioStore) -> any BatchCommitting)? = nil) throws {
+        self.dataRoot = dataRoot
         store = try StudioStore(dataRoot: dataRoot)
         directories = OutputDirectoryStore(store: store)
         assets = GeneratedAssetStore(store: store, directories: directories)
@@ -50,6 +52,8 @@ final class AppState {
             else if let latest = try await store.listProjects().first { draft.load(latest) }
         } catch { errorMessage = "恢复本地工作区失败，请检查作品库和输出目录。" }
         await outputFolders.loadDefault()
+        do { try await LegacyImporter(dataRoot: dataRoot, store: store).recoverAbandonedStages() }
+        catch { errorMessage = "旧版导入暂存清理失败，请检查应用数据目录。" }
         do { try await assets.reconcilePendingOperations() }
         catch { errorMessage = "部分生成文件待恢复；请重新授权输出目录后刷新作品库。" }
         await templates.reload()

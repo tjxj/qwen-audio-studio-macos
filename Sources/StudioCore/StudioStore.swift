@@ -66,6 +66,62 @@ public actor StudioStore {
         try db.execute("INSERT INTO projects(id,revision,fields) VALUES(?,1,?)", [.text(id), .blob(try storeEncode(fields))])
         return draft
     }
+
+    /// Commit all historical rows together. No legacy consent or provider receipt is
+    /// inserted, so imported records can never authorize a paid request or upload.
+    func activateLegacyImport(projects: [LegacyProject], jobs: [LegacyJob], directory: DirectorySnapshot,
+                              assets: [LegacyImportedAsset]) throws {
+        try db.transaction {
+            for project in projects {
+                guard try getProject(id: project.id) == nil else { throw LegacyImportError.destinationConflict }
+            }
+            for job in jobs {
+                guard try getJob(id: job.id) == nil else { throw LegacyImportError.destinationConflict }
+            }
+            for asset in assets {
+                guard try getAsset(id: asset.asset.id) == nil else { throw LegacyImportError.destinationConflict }
+            }
+            try saveDirectory(directory)
+            let drafts = Dictionary(uniqueKeysWithValues: try projects.map { project -> (String, ProjectDraft) in
+                let fields = DraftFields(name: project.name, mode: project.mode, prompt: project.prompt,
+                                         params: project.params, referenceBindings: [], outputDirectoryID: nil)
+                let draft = ProjectDraft(id: project.id, fields: fields, revision: project.revision)
+                try db.execute("INSERT INTO projects(id,revision,fields) VALUES(?,?,?)",
+                               [.text(project.id), .integer(project.revision), .blob(try storeEncode(fields))])
+                if project.archived {
+                    try db.execute("INSERT INTO project_metadata(project_id,archived) VALUES(?,1)", [.text(project.id)])
+                }
+                return (project.id, draft)
+            })
+            for batchID in Set(jobs.map(\.batchID)).sorted() {
+                let group = jobs.filter { $0.batchID == batchID }.sorted { $0.candidateIndex < $1.candidateIndex }
+                guard let first = group.first, let project = drafts[first.projectID], group.allSatisfy({ $0.projectID == first.projectID }),
+                      group.count <= 3 else { throw LegacyImportError.corrupt("批次关系无效。") }
+                let requestID = "import_" + batchID
+                let seeds = group.map(\.seed)
+                let submission = BatchSubmission(clientRequestID: requestID, project: project,
+                    compiledPrompt: project.fields.prompt, candidateSeeds: seeds, directory: directory, references: [],
+                    consent: UploadConsent(clientRequestID: requestID, references: [], confirmed: false))
+                try db.execute("INSERT INTO batches(id,client_request_id,request_hash,project_id,submission) VALUES(?,?,?,?,?)",
+                               [.text(batchID), .text(requestID), .text("historical-" + batchID), .text(project.id), .blob(try storeEncode(submission))])
+                for (index, job) in group.enumerated() {
+                    try db.execute("INSERT INTO jobs(id,batch_id,candidate_index,seed,state,created_at_ms) VALUES(?,?,?,?,?,?)",
+                                   [.text(job.id), .text(batchID), .integer(index), .integer(job.seed), .text(job.state.rawValue), .integer(job.createdAtMS)])
+                    try db.execute("INSERT INTO job_metadata(job_id,name,favorite,note) VALUES(?,?,?,?)",
+                                   [.text(job.id), .text(job.displayName), .integer(job.favorite ? 1 : 0), .text(job.note)])
+                    if job.deleted {
+                        try db.execute("INSERT INTO removed_jobs(job_id,scope) VALUES(?,'recordOnly')", [.text(job.id)])
+                    }
+                }
+            }
+            for project in projects {
+                if let final = project.finalJobID, let batch = jobs.first(where: { $0.id == final })?.batchID {
+                    try db.execute("INSERT INTO batch_final(batch_id,job_id) VALUES(?,?)", [.text(batch), .text(final)])
+                }
+            }
+            for item in assets { try registerAsset(item.asset) }
+        }
+    }
     public func getProject(id: String) throws -> ProjectDraft? {
         guard let row = try db.rows("SELECT id,revision,fields FROM projects WHERE id=?", [.text(id)]).first else { return nil }
         return try project(row)
@@ -76,6 +132,7 @@ public actor StudioStore {
     public func currentProjectID() throws -> String? {
         try db.rows("SELECT current_project_id FROM workspace_state WHERE singleton=1").first?.first?.string
     }
+    func applicationDataRoot() -> URL { dataRoot }
     public func setCurrentProject(id: String?) throws {
         if let id, try getProject(id: id) == nil { throw StudioStoreError.missing }
         try db.execute("INSERT INTO workspace_state(singleton,current_project_id) VALUES(1,?) ON CONFLICT(singleton) DO UPDATE SET current_project_id=excluded.current_project_id",

@@ -138,6 +138,15 @@ public actor ReferenceAudioService {
             try FileManager.default.removeItem(at: url)
             imports.removeValue(forKey: String(name.dropFirst(7)))
         }
+        for url in try FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: [.contentModificationDateKey, .isRegularFileKey, .isSymbolicLinkKey]) {
+            let name = url.deletingPathExtension().lastPathComponent
+            let values = try url.resourceValues(forKeys: [.contentModificationDateKey, .isRegularFileKey, .isSymbolicLinkKey])
+            guard name.hasPrefix("decode_"), UUID(uuidString: String(name.dropFirst(7))) != nil,
+                  ["wav", "mp3", "m4a", "ogg"].contains(url.pathExtension.lowercased()),
+                  values.isRegularFile == true, values.isSymbolicLink != true,
+                  let date = values.contentModificationDate, date <= cutoff else { continue }
+            try FileManager.default.removeItem(at: url)
+        }
         return removed
     }
     private func clipURL(_ reference: ReferenceSnapshot) throws -> URL {

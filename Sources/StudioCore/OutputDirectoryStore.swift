@@ -51,6 +51,7 @@ public actor OutputDirectoryStore {
         try await store.setDefaultDirectory(id: id)
     }
     public func reauthorize(directoryID: String, selectedURL: URL) async throws {
+        if directoryID.hasPrefix("legacy_dir_") { throw OutputDirectoryError.unavailable }
         guard selectedURL.isFileURL else { throw OutputDirectoryError.invalidPath }
         guard let snapshot = try await store.getDirectory(id: directoryID) else { throw OutputDirectoryError.unregistered }
         let started = bookmarks.start(selectedURL)
@@ -98,6 +99,15 @@ public actor OutputDirectoryStore {
         return try await open(snapshot)
     }
     private func open(_ snapshot: DirectorySnapshot, jobID: String? = nil, relativeDirectory: String? = nil) async throws -> DirectoryLease {
+        if snapshot.id.hasPrefix("legacy_dir_"),
+           let uuid = UUID(uuidString: String(snapshot.id.dropFirst("legacy_dir_".count))),
+           snapshot.bookmark == Data("app-owned-legacy-v1".utf8) {
+            let root = await store.applicationDataRoot().appendingPathComponent("LegacyAudio/import_\(uuid.uuidString)", isDirectory: true)
+            let access = try ScopedFileAccess(url: root)
+            guard try access.rootIdentity() == snapshot.rootIdentity else { throw OutputDirectoryError.directoryMismatch }
+            return DirectoryLease(directoryID: snapshot.id, rootURL: root, jobID: jobID,
+                relativeDirectory: relativeDirectory, access: access, release: {})
+        }
         let result = try bookmarks.resolve(snapshot.bookmark)
         guard bookmarks.start(result.url) else { throw OutputDirectoryError.reauthorizationRequired }
         do {

@@ -29,7 +29,7 @@ import Observation
         nextBeforeID = pages.last?.nextBeforeID
         loadedPages = reset ? 1 : max(loadedPages, pages.count)
         pinnedSelectedJobID = nil
-        if !reset, hasUnsavedEdits, let retainedSelection,
+        if hasUnsavedEdits, let retainedSelection,
            retainedSelection.job.id == selectedJobID,
            !items.contains(where: { $0.job.id == selectedJobID }) {
             items.insert(retainedSelection, at: 0)
@@ -245,7 +245,7 @@ struct LibraryScreen: View {
                     HStack {
                         Text(audioChecking ? "正在核验生成音频…" : "音频文件缺失、已更换或无法解码。")
                             .font(.caption).foregroundStyle(.orange)
-                        if let selectedAudioAsset {
+                        if let selectedAudioAsset, !selectedAudioAsset.directoryID.hasPrefix("legacy_dir_") {
                             Button("重新授权目录") { Task {
                                 if await state?.outputFolders.reauthorize(selectedAudioAsset.directoryID) == true { await inspectSelectedAudio() }
                             } }.font(.caption)
@@ -343,7 +343,7 @@ struct LibraryScreen: View {
                       favoriteOnly == queryFavorite, recentDays == queryDays else { return }
                 let oldID = rows.selectedJobID, oldState = rows.selected?.job.state
                 var retained: StudioCore.LibraryItem?
-                if !resetPagination, rows.hasUnsavedEdits, let old = rows.selected,
+                if rows.hasUnsavedEdits, let old = rows.selected,
                    !pages.flatMap(\.items).contains(where: { $0.job.id == old.job.id }) {
                     let updatedJob = try await state.store.getJob(id: old.job.id)
                     retained = updatedJob.map { old.updatingJob($0) } ?? old

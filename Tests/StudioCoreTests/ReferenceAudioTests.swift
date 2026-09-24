@@ -4,6 +4,20 @@ import AVFoundation
 @testable import StudioCore
 
 struct ReferenceAudioTests {
+    @Test func cleanupOnlyRemovesOldAppOwnedDecodeIntermediates() async throws {
+        let (root, _, service) = try fixture(); defer { try? FileManager.default.removeItem(at: root) }
+        let directory = root.appendingPathComponent("audio")
+        let old = directory.appendingPathComponent("decode_\(UUID().uuidString).ogg")
+        let active = directory.appendingPathComponent("decode_\(UUID().uuidString).m4a")
+        let user = directory.appendingPathComponent("decode_notes.ogg")
+        for file in [old, active, user] { try Data("synthetic".utf8).write(to: file) }
+        try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-7200)], ofItemAtPath: old.path)
+        try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-7200)], ofItemAtPath: user.path)
+        _ = try await service.cleanup()
+        #expect(!FileManager.default.fileExists(atPath: old.path))
+        #expect(FileManager.default.fileExists(atPath: active.path))
+        #expect(FileManager.default.fileExists(atPath: user.path))
+    }
     @Test func unexpectedRemovalFailureKeepsJournalEvenWhenExistenceCheckWouldBeFalse() async throws {
         let (root, store, original) = try fixture(); defer { try? FileManager.default.removeItem(at: root) }
         let source = root.appendingPathComponent("synthetic.wav"); try wav(source, seconds: 1)

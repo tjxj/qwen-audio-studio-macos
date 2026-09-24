@@ -35,6 +35,20 @@ import Testing
         #expect(rows.selected?.job.state == .success)
     }
 
+    @Test func manualFilterResetRetainsDirtySelectedMetadata() {
+        let rows = LibraryRowsState()
+        let original = item("changing", state: .queued)
+        rows.apply(pages: [LibraryPage(items: [original], nextBeforeID: nil)], reset: true)
+        rows.editName("手动筛选前的新名")
+        rows.editNote("未保存的重要备注")
+        rows.apply(pages: [LibraryPage(items: [], nextBeforeID: nil)], reset: true,
+                   retainedSelection: item("changing", state: .success))
+        #expect(rows.selectedJobID == "changing")
+        #expect(rows.name == "手动筛选前的新名")
+        #expect(rows.note == "未保存的重要备注")
+        #expect(rows.pinnedSelectedJobID == "changing")
+    }
+
     @Test func pollingRetainsLoadedSecondPageAndCursor() {
         let rows = LibraryRowsState()
         rows.apply(pages: [LibraryPage(items: [item("new")], nextBeforeID: "new")], reset: true)

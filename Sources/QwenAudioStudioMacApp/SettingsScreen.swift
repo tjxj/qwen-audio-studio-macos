@@ -14,6 +14,7 @@ struct SettingsScreen: View {
     @State private var localStorageBytes: Int64 = 0
     @State private var generatedStorageBytes: Int64 = 0
     @State private var unavailableGeneratedFiles = 0
+    @State private var showingLegacyImport = false
     private let credentials = NativeCredentialStore()
 
     var body: some View {
@@ -90,6 +91,10 @@ struct SettingsScreen: View {
                         }
                         Button("检查本地环境") { Task { await checkEnvironment() } }
                         Text(environmentStatus).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                        if state != nil {
+                            Button("导入旧版作品…") { showingLegacyImport = true }
+                                .font(.caption)
+                        }
                     }.card()
 
                     VStack(alignment: .leading, spacing: 8) {
@@ -135,6 +140,7 @@ struct SettingsScreen: View {
         .frame(width: 780, height: 590)
         .background(StudioPalette.background)
         .onAppear { if qaMode { credentialStatus = "演示模式：未读取钥匙串" } else { refreshCredentialStatus() } }
+        .sheet(isPresented: $showingLegacyImport) { if let state { ImportSheet(state: state) } }
         .task { await checkEnvironment() }
         .onChange(of: preferences.defaultConcurrency) { _, value in
             if let state { Task { await state.generation.setMaxConcurrentJobs(value) } }

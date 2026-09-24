@@ -114,11 +114,28 @@ struct QwenAudioStudioMacApp: App {
                 do {
                     let root = URL(fileURLWithPath: String(argument.dropFirst("--capture-task9-root=".count)), isDirectory: true)
                     let state = try AppState(dataRoot: root)
-                    try await seedCapture(state: state, root: root)
+                    let importCapture = ProcessInfo.processInfo.arguments.contains("--capture-page=import")
+                    if !importCapture { try await seedCapture(state: state, root: root) }
                     let settingsCapture = ProcessInfo.processInfo.arguments.contains("--capture-page=settings")
-                    let content: AnyView = settingsCapture
-                        ? AnyView(SettingsScreen(state: state, qaMode: true).environment(preferences).environment(state.outputFolders))
-                        : AnyView(AppShell(appState: state, qaMode: true).environment(preferences).environment(state.outputFolders))
+                    let content: AnyView
+                    if importCapture {
+                        let source = root.appendingPathComponent("Synthetic Legacy", isDirectory: true)
+                        try FileManager.default.createDirectory(at: source.appendingPathComponent("projects"), withIntermediateDirectories: true)
+                        try FileManager.default.createDirectory(at: source.appendingPathComponent("jobs"), withIntermediateDirectories: true)
+                        let project: [String: Any] = ["id":"synthetic-project", "name":"合成播客片头", "mode":"podcast", "prompt":"今晚，让声音陪你慢下来。"]
+                        let job: [String: Any] = ["id":"synthetic-job", "project_id":"synthetic-project", "display_name":"合成演示", "status":"success", "output_asset_id":"synthetic-asset"]
+                        try JSONSerialization.data(withJSONObject: project).write(to: source.appendingPathComponent("projects/synthetic-project.json"))
+                        try JSONSerialization.data(withJSONObject: job).write(to: source.appendingPathComponent("jobs/synthetic-job.json"))
+                        let assets: [String: Any] = ["synthetic-asset":["path":"output/missing.wav"]]
+                        try JSONSerialization.data(withJSONObject: assets).write(to: source.appendingPathComponent("assets.json"))
+                        let flow = LegacyImportFlow(importer: LegacyImporter(dataRoot: root, store: state.store))
+                        await flow.inspect(source: source)
+                        content = AnyView(ImportQAPresentation(flow: flow).environment(preferences))
+                    } else if settingsCapture {
+                        content = AnyView(SettingsScreen(state: state, qaMode: true).environment(preferences).environment(state.outputFolders))
+                    } else {
+                        content = AnyView(AppShell(appState: state, qaMode: true).environment(preferences).environment(state.outputFolders))
+                    }
                     window.contentView = NSHostingView(rootView: content.preferredColorScheme(preferences.appearance.colorScheme))
                     if settingsCapture { window.toolbar = nil; window.title = "设置" }
                 } catch { print("capture fixture setup failed: \(error.localizedDescription)"); exit(1) }
@@ -205,7 +222,8 @@ struct QwenAudioStudioMacApp: App {
         window.makeKeyAndOrderFront(nil)
         window.makeFirstResponder(nil)
 
-        let prefix = ProcessInfo.processInfo.arguments.contains("--capture-page=templates") ? "templates" :
+        let prefix = ProcessInfo.processInfo.arguments.contains("--capture-page=import") ? "import" :
+            ProcessInfo.processInfo.arguments.contains("--capture-page=templates") ? "templates" :
             ProcessInfo.processInfo.arguments.contains("--capture-page=library") ? "library" :
             ProcessInfo.processInfo.arguments.contains("--capture-page=settings") ? "settings" : "creation"
         if prefix == "settings" { window.toolbar = nil; window.title = "设置" }
