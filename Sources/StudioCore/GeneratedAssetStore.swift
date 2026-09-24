@@ -3,7 +3,6 @@ public enum AssetRemovalScope: String, Codable, Sendable { case recordOnly, gene
 public actor GeneratedAssetStore {
     private let store: StudioStore
     private let directories: OutputDirectoryStore
-    private var busyJobs: Set<String> = []
     public init(store: StudioStore, directories: OutputDirectoryStore) { self.store = store; self.directories = directories }
 
     public func write(data: Data, fileName: String, kind: String, job: String, lease: DirectoryLease) async throws -> StoredAsset {
@@ -27,8 +26,9 @@ public actor GeneratedAssetStore {
         _ = try await write(data: Data(report.utf8), fileName: "report.txt", kind: "report", job: job, lease: lease)
     }
     public func trash(job: String, scope: AssetRemovalScope) async throws {
-        guard busyJobs.insert(job).inserted else { throw StudioStoreError.invalidTransition }
-        defer { busyJobs.remove(job) }
+        try await store.withFileJob(job) { try await self.trashClaimed(job: job, scope: scope) }
+    }
+    private func trashClaimed(job: String, scope: AssetRemovalScope) async throws {
         guard let item = try await store.getJob(id: job), item.state.isTerminal else { throw StudioStoreError.invalidTransition }
         try await reconcile(job: job)
         if scope == .generatedFiles {
@@ -48,8 +48,9 @@ public actor GeneratedAssetStore {
         try await store.removeJobRecord(id: job, scope: scope)
     }
     public func restore(job: String) async throws {
-        guard busyJobs.insert(job).inserted else { throw StudioStoreError.invalidTransition }
-        defer { busyJobs.remove(job) }
+        try await store.withFileJob(job) { try await self.restoreClaimed(job: job) }
+    }
+    private func restoreClaimed(job: String) async throws {
         try await reconcile(job: job)
         for asset in try await store.listAssets(jobID: job) where asset.appOwned {
             guard let original = try await store.originalAssetPath(id: asset.id) else { continue }
@@ -82,7 +83,15 @@ public actor GeneratedAssetStore {
     /// Resume local journal entries after a crash, never any generation request.
     /// Unavailable disks keep entries pending for explicit retry after reconnect.
     public func reconcilePendingOperations() async throws {
-        try await reconcile(job: nil)
+        var jobs: Set<String> = []
+        for operation in try await store.pendingFileOperations() {
+            guard let asset = try await store.getAsset(id: operation.assetID), asset.appOwned,
+                  asset.fileIdentity != nil else { throw OutputDirectoryError.invalidPath }
+            jobs.insert(asset.jobID)
+        }
+        for job in jobs.sorted() {
+            try await store.withFileJob(job) { try await self.reconcile(job: job) }
+        }
     }
     private func reconcile(job: String?) async throws {
         for operation in try await store.pendingFileOperations() {

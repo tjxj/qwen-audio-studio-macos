@@ -5,6 +5,7 @@ import Foundation
 public actor StudioStore {
     private let db: SQLiteConnection
     private var ownership: InstanceOwnership?
+    private var busyFileJobs: Set<String> = []
 
     public init(dataRoot: URL) throws {
         let ownership = try InstanceOwnership.acquire(dataRoot: dataRoot)
@@ -30,7 +31,10 @@ public actor StudioStore {
     }
     deinit { try? db.close() }
     /// Orderly shutdown: close SQLite before releasing the process lock.
-    public func close() throws { try db.close(); ownership = nil }
+    public func close() throws {
+        guard busyFileJobs.isEmpty else { throw StudioStoreError.invalidTransition }
+        try db.close(); ownership = nil
+    }
 
     public func createProject(id: String = "proj_" + UUID().uuidString, fields: DraftFields) throws -> ProjectDraft {
         guard !id.isEmpty else { throw StudioStoreError.invalidSubmission }
@@ -276,6 +280,13 @@ public actor StudioStore {
     }
     public func listAssets(directoryID: String) throws -> [StoredAsset] {
         try db.rows("SELECT metadata FROM assets WHERE directory_id=? ORDER BY rowid", [.text(directoryID)]).map { try storeDecode(StoredAsset.self, $0[0]) }
+    }
+    /// Covers journal inspection, filesystem movement and final metadata commit,
+    /// including actor reentrancy while the caller awaits another service.
+    public func withFileJob<T: Sendable>(_ job: String, operation: @Sendable () async throws -> T) async throws -> T {
+        guard busyFileJobs.insert(job).inserted else { throw StudioStoreError.invalidTransition }
+        defer { busyFileJobs.remove(job) }
+        return try await operation()
     }
     /// Journal first; Task 5 moves files outside this transaction, then finishes the entry.
     public func journalFileOperation(_ operation: FileOperation) throws {

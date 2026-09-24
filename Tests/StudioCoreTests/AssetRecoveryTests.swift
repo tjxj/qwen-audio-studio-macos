@@ -2,7 +2,129 @@ import Foundation
 import Testing
 @testable import StudioCore
 
+final class PausedBookmarkResolution: DirectoryBookmarking, @unchecked Sendable {
+    private let entered = DispatchSemaphore(value: 0)
+    private let proceed = DispatchSemaphore(value: 0)
+    func create(for url: URL) throws -> Data { try FixtureBookmarks().create(for: url) }
+    func resolve(_ data: Data) throws -> BookmarkResolution {
+        entered.signal()
+        guard proceed.wait(timeout: .now() + 10) == .success else { throw OutputDirectoryError.unavailable }
+        return try FixtureBookmarks().resolve(data)
+    }
+    func start(_ url: URL) -> Bool { true }
+    func stop(_ url: URL) {}
+    func waitUntilEntered() async -> Bool {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global().async {
+                continuation.resume(returning: self.entered.wait(timeout: .now() + 10) == .success)
+            }
+        }
+    }
+    func resume() { proceed.signal() }
+}
+
 struct AssetRecoveryTests {
+    @Test func storeCannotCloseWhileFileJobOwnsPendingJournal() async throws {
+        let f = try OutputFixture()
+        let (job, id) = try await f.job()
+        let lease = try await f.directories.resolveForJob(job, directoryID: id)
+        let assets = GeneratedAssetStore(store: f.store, directories: f.directories)
+        let audio = try await assets.write(data: Data("owned".utf8), fileName: "audio.wav", kind: "audio", job: job, lease: lease)
+        let destination = lease.relativeDirectory! + "/pending-close.wav"
+        try await f.store.journalFileOperation(FileOperation(id: UUID().uuidString, assetID: audio.id,
+            sourceRelativePath: audio.relativePath, destinationRelativePath: destination, kind: .trash))
+        let gate = PausedBookmarkResolution()
+        let first = GeneratedAssetStore(store: f.store, directories: OutputDirectoryStore(store: f.store, bookmarks: gate))
+        let pending = Task { try await first.reconcilePendingOperations() }
+        #expect(await gate.waitUntilEntered())
+        await #expect(throws: StudioStoreError.invalidTransition) { try await f.store.close() }
+        #expect(try await f.store.pendingFileOperations().count == 1)
+        gate.resume()
+        try await pending.value
+        #expect(try await f.store.getAsset(id: audio.id)?.relativePath == destination)
+        #expect(try String(contentsOf: f.output.appendingPathComponent(destination), encoding: .utf8) == "owned")
+        lease.close()
+        try await f.store.close()
+        try FileManager.default.removeItem(at: f.root)
+    }
+
+    @Test func twoReconcilersDoNotReplayOnePendingJournalTogether() async throws {
+        let f = try OutputFixture()
+        let (job, id) = try await f.job()
+        let lease = try await f.directories.resolveForJob(job, directoryID: id)
+        let assets = GeneratedAssetStore(store: f.store, directories: f.directories)
+        let audio = try await assets.write(data: Data("owned".utf8), fileName: "audio.wav", kind: "audio", job: job, lease: lease)
+        let destination = lease.relativeDirectory! + "/recycled.wav"
+        try await f.store.journalFileOperation(FileOperation(id: UUID().uuidString, assetID: audio.id,
+            sourceRelativePath: audio.relativePath, destinationRelativePath: destination, kind: .trash))
+        try Data("new user target".utf8).write(to: f.output.appendingPathComponent(destination))
+        let gate = PausedBookmarkResolution()
+        let first = GeneratedAssetStore(store: f.store, directories: OutputDirectoryStore(store: f.store, bookmarks: gate))
+        let pending = Task { try await first.reconcilePendingOperations() }
+        #expect(await gate.waitUntilEntered())
+        await #expect(throws: StudioStoreError.invalidTransition) { try await assets.reconcilePendingOperations() }
+        #expect(try await f.store.pendingFileOperations().count == 1)
+        #expect(try await f.store.getAsset(id: audio.id)?.relativePath == audio.relativePath)
+        gate.resume()
+        try await pending.value
+        let recorded = try #require(try await f.store.getAsset(id: audio.id))
+        #expect(recorded.relativePath != destination)
+        #expect(try String(contentsOf: f.output.appendingPathComponent(recorded.relativePath), encoding: .utf8) == "owned")
+        #expect(try String(contentsOf: f.output.appendingPathComponent(destination), encoding: .utf8) == "new user target")
+        lease.close()
+        try await f.cleanup()
+    }
+
+    @Test func trashCannotCompeteWithPendingReconcile() async throws {
+        let f = try OutputFixture()
+        let (job, id) = try await f.job()
+        let lease = try await f.directories.resolveForJob(job, directoryID: id)
+        let assets = GeneratedAssetStore(store: f.store, directories: f.directories)
+        let audio = try await assets.write(data: Data("owned".utf8), fileName: "audio.wav", kind: "audio", job: job, lease: lease)
+        _ = try await f.store.cancelQueued(id: job)
+        let destination = lease.relativeDirectory! + "/pending-trash.wav"
+        try await f.store.journalFileOperation(FileOperation(id: UUID().uuidString, assetID: audio.id,
+            sourceRelativePath: audio.relativePath, destinationRelativePath: destination, kind: .trash))
+        let gate = PausedBookmarkResolution()
+        let first = GeneratedAssetStore(store: f.store, directories: OutputDirectoryStore(store: f.store, bookmarks: gate))
+        let pending = Task { try await first.reconcilePendingOperations() }
+        #expect(await gate.waitUntilEntered())
+        await #expect(throws: StudioStoreError.invalidTransition) { try await assets.trash(job: job, scope: .generatedFiles) }
+        gate.resume()
+        try await pending.value
+        #expect(try await f.store.getAsset(id: audio.id)?.relativePath == destination)
+        #expect(try await f.store.listLibrary().contains { $0.id == job })
+        #expect(try String(contentsOf: f.output.appendingPathComponent(destination), encoding: .utf8) == "owned")
+        lease.close()
+        try await f.cleanup()
+    }
+
+    @Test func restoreCannotCompeteWithPendingReconcile() async throws {
+        let f = try OutputFixture()
+        let (job, id) = try await f.job()
+        let lease = try await f.directories.resolveForJob(job, directoryID: id)
+        let assets = GeneratedAssetStore(store: f.store, directories: f.directories)
+        let audio = try await assets.write(data: Data("owned".utf8), fileName: "audio.wav", kind: "audio", job: job, lease: lease)
+        _ = try await f.store.cancelQueued(id: job)
+        try await assets.trash(job: job, scope: .generatedFiles)
+        let recycled = try #require(try await f.store.getAsset(id: audio.id))
+        let destination = audio.relativePath
+        try await f.store.journalFileOperation(FileOperation(id: UUID().uuidString, assetID: audio.id,
+            sourceRelativePath: recycled.relativePath, destinationRelativePath: destination, kind: .restore))
+        let gate = PausedBookmarkResolution()
+        let first = GeneratedAssetStore(store: f.store, directories: OutputDirectoryStore(store: f.store, bookmarks: gate))
+        let pending = Task { try await first.reconcilePendingOperations() }
+        #expect(await gate.waitUntilEntered())
+        await #expect(throws: StudioStoreError.invalidTransition) { try await assets.restore(job: job) }
+        gate.resume()
+        try await pending.value
+        #expect(try await f.store.getAsset(id: audio.id)?.relativePath == destination)
+        #expect(try await f.store.listLibrary().isEmpty)
+        #expect(try String(contentsOf: f.output.appendingPathComponent(destination), encoding: .utf8) == "owned")
+        lease.close()
+        try await f.cleanup()
+    }
+
     @Test func movedTrashJournalFinishesWhenOriginalSourceIsReoccupied() async throws {
         let f = try OutputFixture()
         let (job, id) = try await f.job()

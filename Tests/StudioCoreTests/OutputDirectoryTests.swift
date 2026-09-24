@@ -62,6 +62,32 @@ final class BookmarkAccessProbe: DirectoryBookmarking, @unchecked Sendable {
 }
 
 struct OutputDirectoryTests {
+    @Test func staleBookmarkCanReserveAndPreflightJobDirectory() async throws {
+        let probe = BookmarkAccessProbe(stale: true)
+        let f = try OutputFixture(bookmarks: probe)
+        let (job, id) = try await f.job()
+        let lease = try await f.directories.resolveForJob(job, directoryID: id)
+        #expect(lease.jobID == job)
+        #expect((try await f.store.getDirectory(id: id)?.version ?? 0) >= 2)
+        #expect(try await f.store.jobOutputFolder(jobID: job)?.relativePath == lease.relativeDirectory)
+        lease.close()
+        #expect(probe.balance == 0)
+        try await f.cleanup()
+    }
+
+    @Test func legacyBookmarkCanReserveAndPreflightJobDirectory() async throws {
+        let f = try OutputFixture()
+        let (job, id) = try await f.job()
+        let current = try #require(try await f.store.getDirectory(id: id))
+        try await f.store.saveDirectory(DirectorySnapshot(id: id, version: current.version, bookmark: current.bookmark))
+        let lease = try await f.directories.resolveForJob(job, directoryID: id)
+        #expect(lease.jobID == job)
+        #expect(try await f.store.getDirectory(id: id)?.rootIdentity != nil)
+        #expect(try await f.store.jobOutputFolder(jobID: job)?.relativePath == lease.relativeDirectory)
+        lease.close()
+        try await f.cleanup()
+    }
+
     @Test func reauthorizationKeepsDirectoryIDAndRecoversOldAssetAndPendingMove() async throws {
         let f = try OutputFixture()
         let (job, id) = try await f.job()

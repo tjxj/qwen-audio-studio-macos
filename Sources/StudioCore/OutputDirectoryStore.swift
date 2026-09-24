@@ -134,7 +134,8 @@ public actor OutputDirectoryStore {
             } catch { try? root.withAccess { try $0.removeEmptyDirectory(name) }; throw error }
         }
         guard folder.directoryID == directoryID else { throw OutputDirectoryError.invalidPath }
-        let lease = try await open(snapshot, jobID: job, relativeDirectory: folder.relativePath)
+        guard let refreshedSnapshot = try await store.getDirectory(id: directoryID) else { throw OutputDirectoryError.unregistered }
+        let lease = try await open(refreshedSnapshot, jobID: job, relativeDirectory: folder.relativePath)
         do {
             try lease.withAccess {
                 guard try $0.identity(folder.relativePath, directory: true) == folder.identity else { throw OutputDirectoryError.invalidPath }
