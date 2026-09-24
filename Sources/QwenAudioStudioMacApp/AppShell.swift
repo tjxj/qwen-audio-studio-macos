@@ -32,23 +32,27 @@ private enum StudioPage: String, CaseIterable, Identifiable {
 }
 
 struct AppShell: View {
+    let appState: AppState?
     @State private var draft: DraftController
     @State private var templateApplication: TemplateApplicationController
     @State private var templateLibrary = TemplateLibraryController()
     @State private var promptEditor = PromptEditorHandle()
-    @State private var selection: StudioPage? = ProcessInfo.processInfo.arguments.contains("--capture-page=templates") ? .templates : .creation
+    @State private var selection: StudioPage? = ProcessInfo.processInfo.arguments.contains("--capture-page=templates") ? .templates :
+        ProcessInfo.processInfo.arguments.contains("--capture-page=library") ? .library : .creation
     @Environment(\.openSettings) private var openSettings
     @Environment(\.colorScheme) private var colorScheme
 
-    init(qaMode: Bool = false) {
+    init(appState: AppState? = nil, qaMode: Bool = false) {
+        self.appState = appState
         let longScript = ProcessInfo.processInfo.arguments.contains("--capture-long-script")
         let fields: DraftFields? = longScript ? DraftFields(name: "长脚本布局验证", prompt:
             Array(repeating: DraftController.sample(for: .podcast), count: 20).joined(separator: "\n\n")) :
             (qaMode ? DraftFields(name: "雨夜里的慢生活", prompt: DraftController.sample(for: .podcast)) : nil)
         // QA uses these in-memory adapters explicitly; never inject production persistence here.
-        let controller = DraftController(fields: fields, store: InMemoryDraftStore())
+        let controller = appState?.draft ?? DraftController(fields: fields, store: InMemoryDraftStore())
         _draft = State(initialValue: controller)
         _templateApplication = State(initialValue: TemplateApplicationController(draft: controller))
+        if let appState { _templateLibrary = State(initialValue: appState.templates) }
     }
 
     var body: some View {
@@ -109,15 +113,17 @@ struct AppShell: View {
         } detail: {
             Group {
                 switch selection ?? .creation {
-                case .creation: CreationScreen(draft: draft, sharedUndoManager: templateApplication.undoManager, editor: promptEditor)
-                case .library: LibraryScreen()
+                case .creation: CreationScreen(draft: draft, sharedUndoManager: templateApplication.undoManager, editor: promptEditor, appState: appState)
+                case .library: LibraryScreen(state: appState) { project in
+                    Task { await appState?.openProject(project); selection = .creation }
+                }
                 case .templates: TemplateScreen(library: templateLibrary, application: templateApplication) { selection = .creation }
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .navigationSplitViewStyle(.balanced)
-        .tint(StudioPalette.green)
+        .tint(colorScheme == .dark ? Color(red: 0.50, green: 0.79, blue: 0.69) : StudioPalette.green)
         .focusedSceneValue(\.draftController, draft)
     }
 

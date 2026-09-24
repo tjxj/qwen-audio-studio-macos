@@ -18,6 +18,23 @@ private actor FakeSynthesizer: SynthesizerClient {
     func calls() -> [Int] { seeds }
 }
 
+private actor HoldingSynthesizer: SynthesizerClient {
+    private var seeds: [Int] = []
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private var released = false
+    let failSeed: Int?
+    init(failSeed: Int? = nil) { self.failSeed = failSeed }
+    func synthesize(_ request: CompiledRequest) async throws -> ProviderOutput {
+        seeds.append(request.seed)
+        if !released { await withCheckedContinuation { waiters.append($0) } }
+        if request.seed == failSeed { throw URLError(.timedOut) }
+        return ProviderOutput(receipt: ProviderResponseSnapshot(providerRequestID: "synthetic-id-\(request.seed)",
+            audioURL: URL(string: "https://audio.example.invalid/a.wav")!, expiresAt: Date().addingTimeInterval(3600)))
+    }
+    func release() { released = true; let pending = waiters; waiters = []; pending.forEach { $0.resume() } }
+    func calls() -> [Int] { seeds }
+}
+
 private actor PausedBatchCommitter: BatchCommitting {
     private let store: StudioStore
     private var entered = 0
@@ -63,6 +80,104 @@ private extension GenerationService {
 }
 
 struct GenerationServiceTests {
+    private func waitForCalls(_ expected: Int, fake: HoldingSynthesizer) async -> Bool {
+        for _ in 0..<40 {
+            if await fake.calls().count >= expected { return true }
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        return false
+    }
+
+    @Test(arguments: [2, 3]) func configuredConcurrentCandidatesEnterRequestingOnce(limit: Int) async throws {
+        let (root, store, dirs, assets, _, _) = try fixture(); defer { try? FileManager.default.removeItem(at: root) }
+        let fake = HoldingSynthesizer()
+        let service = GenerationService(store: store, directories: dirs, assets: assets, synthesizer: fake,
+                                        downloader: FakeAudioDownloader(), maxConcurrentJobs: limit)
+        let request = try await input(root, store, dirs, candidates: 3)
+        let plan = try await service.preflight(request)
+        let authorization = try await service.confirm(plan)
+        let first = Task { try await service.submit(plan, confirmedHash: authorization.confirmationHash, clientRequestID: request.clientRequestID) }
+        let reached = await waitForCalls(limit, fake: fake)
+        let duplicate = Task { try await service.submit(plan, confirmedHash: authorization.confirmationHash, clientRequestID: request.clientRequestID) }
+        let states = try await store.listLibrary().map(\.state)
+        await fake.release()
+        #expect(reached)
+        #expect(states.filter { $0 == .requesting }.count == limit)
+        let batch = try await first.value
+        #expect(try await duplicate.value.id == batch.id)
+        #expect(Set(await fake.calls()).count == 3)
+        #expect(await fake.calls().count == 3)
+        for id in batch.jobIDs { #expect(try await store.getJob(id: id)?.state == .success) }
+        try await store.close()
+    }
+
+    @Test func parallelCancellationOnlyRemovesUnclaimedCandidate() async throws {
+        let (root, store, dirs, assets, _, _) = try fixture(); defer { try? FileManager.default.removeItem(at: root) }
+        let fake = HoldingSynthesizer()
+        let service = GenerationService(store: store, directories: dirs, assets: assets, synthesizer: fake,
+                                        downloader: FakeAudioDownloader(), maxConcurrentJobs: 2)
+        let request = try await input(root, store, dirs, candidates: 3)
+        let plan = try await service.preflight(request)
+        let authorization = try await service.confirm(plan)
+        let task = Task { try await service.submit(plan, confirmedHash: authorization.confirmationHash, clientRequestID: request.clientRequestID) }
+        let reached = await waitForCalls(2, fake: fake)
+        let batchID = try #require(try await store.listLibrary().first?.batchID)
+        let cancelled = try await service.cancelBatch(batchID: batchID)
+        await fake.release()
+        #expect(reached)
+        #expect(cancelled == 1)
+        let batch = try await task.value
+        #expect(await fake.calls().count == 2)
+        #expect(try await store.getJob(id: batch.jobIDs[2])?.state == .cancelled)
+        try await store.close()
+    }
+
+    @Test func parallelUncertainResponseNeverPostsAgain() async throws {
+        let (root, store, dirs, assets, _, _) = try fixture(); defer { try? FileManager.default.removeItem(at: root) }
+        let fake = HoldingSynthesizer(failSeed: 43)
+        let service = GenerationService(store: store, directories: dirs, assets: assets, synthesizer: fake,
+                                        downloader: FakeAudioDownloader(), maxConcurrentJobs: 2)
+        let request = try await input(root, store, dirs, candidates: 2)
+        let plan = try await service.preflight(request)
+        let authorization = try await service.confirm(plan)
+        let task = Task { try await service.submit(plan, confirmedHash: authorization.confirmationHash, clientRequestID: request.clientRequestID) }
+        let reached = await waitForCalls(2, fake: fake)
+        await fake.release()
+        #expect(reached)
+        let batch = try await task.value
+        #expect(try await store.getJob(id: batch.jobIDs[1])?.state == .interrupted)
+        #expect(try await store.getJob(id: batch.jobIDs[1])?.resultUncertain == true)
+        _ = try await service.submit(plan, confirmedHash: authorization.confirmationHash, clientRequestID: request.clientRequestID)
+        #expect(await fake.calls().count == 2)
+        try await store.close()
+    }
+    @Test func sharedReferenceLeaseSurvivesBothParallelPaidCalls() async throws {
+        let (root, store, dirs, assets, _, _) = try fixture(); defer { try? FileManager.default.removeItem(at: root) }
+        let fake = HoldingSynthesizer()
+        let service = GenerationService(store: store, directories: dirs, assets: assets, synthesizer: fake,
+                                        downloader: FakeAudioDownloader(), maxConcurrentJobs: 2)
+        let base = try await input(root, store, dirs, candidates: 2)
+        let bytes = FakeAudioDownloader.wav(frames: 2 * 48_000)
+        let hash = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+        let reference = ReferenceSnapshot(id: "shared-voice", contentHash: hash, fileName: "synthetic.wav", duration: 2)
+        try await store.saveReference(reference)
+        let fields = DraftFields(prompt: "@voice1 合成测试", referenceBindings: [ReferenceBinding(referenceID: reference.id, alias: "合成", slot: 1)], outputDirectoryID: base.directory.id)
+        let project = try await store.saveProject(id: base.project.id, expectedRevision: 1, changes: fields)
+        let request = GenerationInput(clientRequestID: "parallel-voice", project: project, directory: base.directory,
+            candidateCount: 2, references: [reference], preparedReferences: [PreparedReference(snapshot: reference, mimeType: "audio/wav", data: bytes)])
+        let plan = try await service.preflight(request)
+        let authorization = try await service.confirm(plan)
+        let task = Task { try await service.submit(plan, confirmedHash: authorization.confirmationHash, clientRequestID: request.clientRequestID) }
+        let reached = await waitForCalls(2, fake: fake)
+        let leased = try await store.activeLeaseCount(referenceID: reference.id)
+        await fake.release()
+        #expect(reached)
+        #expect(leased == 2)
+        let batch = try await task.value
+        for id in batch.jobIDs { #expect(try await store.getJob(id: id)?.state == .success) }
+        #expect(try await store.activeLeaseCount(referenceID: reference.id) == 0)
+        try await store.close()
+    }
     private func startSuspendedSubmit(_ service: GenerationService, _ plan: GenerationPlan,
                                       _ authorization: GenerationAuthorization) async -> Task<StoredBatch, Error> {
         let (stream, continuation) = AsyncStream<Void>.makeStream()

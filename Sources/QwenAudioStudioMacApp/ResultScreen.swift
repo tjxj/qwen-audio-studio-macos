@@ -190,7 +190,7 @@ struct ResultScreen: View {
                             if let duration = row.duration { Text(duration.formatted(.number.precision(.fractionLength(2))) + " s").monospacedDigit().foregroundStyle(.secondary) }
                         }
                         WaveformView(peaks: row.waveform, activeFraction: row.duration.map { player.position / $0 } ?? 0)
-                            .frame(height: 118)
+                            .frame(minHeight: 160, maxHeight: .infinity)
                             .padding(.horizontal, 4)
                             .background(StudioPalette.green.opacity(0.035), in: RoundedRectangle(cornerRadius: 10))
                         Slider(value: $selectedPosition, in: 0...max(0.001, row.duration ?? 0.001)) { editing in
@@ -237,7 +237,6 @@ struct ResultScreen: View {
                                 .disabled(!row.playable)
                         }.font(.caption)
                         if let message = controller.message { Text(message).font(.caption).foregroundStyle(.orange) }
-                        Spacer(minLength: 10)
                         Divider()
                         HStack(spacing: 22) {
                             metric("实际时长", value: row.duration.map { String(format: "%.2f 秒", $0) } ?? "—")

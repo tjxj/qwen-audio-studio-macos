@@ -122,16 +122,22 @@ public actor GenerationService {
     private let downloader: any AudioDownloading
     private let batchCommitter: any BatchCommitting
     private let now: @Sendable () -> Date
+    private var maxConcurrentJobs: Int
     private var authorizations: [String: AuthorizationEntry] = [:]
     private var cancelledBatchIDs: Set<String> = []
 
     public init(store: StudioStore, directories: OutputDirectoryStore, assets: GeneratedAssetStore,
                 synthesizer: any SynthesizerClient, downloader: any AudioDownloading = NextAudioDownloader(),
                 now: @escaping @Sendable () -> Date = Date.init,
-                batchCommitter: (any BatchCommitting)? = nil) {
+                batchCommitter: (any BatchCommitting)? = nil,
+                maxConcurrentJobs: Int = 1) {
         self.store = store; self.directories = directories; self.assets = assets
         self.synthesizer = synthesizer; self.downloader = downloader; self.now = now
         self.batchCommitter = batchCommitter ?? SQLiteBatchCommitter(store: store)
+        self.maxConcurrentJobs = min(3, max(1, maxConcurrentJobs))
+    }
+    public func setMaxConcurrentJobs(_ value: Int) {
+        maxConcurrentJobs = min(3, max(1, value))
     }
 
     public func preflight(_ input: GenerationInput) async throws -> GenerationPlan {
@@ -290,17 +296,43 @@ public actor GenerationService {
             for id in batch.jobIDs { _ = try? await store.cancelQueued(id: id) }
             throw GenerationError.confirmationMismatch
         }
-        for (index, id) in batch.jobIDs.enumerated() {
-            if Task.isCancelled { cancelledBatchIDs.insert(batch.id) }
-            if cancelledBatchIDs.contains(batch.id) {
-                _ = try? await store.cancelQueued(id: id)
-                continue
+        let parallelLimit = maxConcurrentJobs
+        do {
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                var next = 0
+                func enqueue(_ index: Int) {
+                    let id = batch.jobIDs[index]
+                    group.addTask {
+                        try await self.runCandidate(jobID: id, batchID: batch.id, index: index,
+                                                    submission: confirmed, preparedReferences: plan.preparedReferences)
+                    }
+                }
+                for _ in 0..<min(parallelLimit, batch.jobIDs.count) { enqueue(next); next += 1 }
+                while try await group.next() != nil {
+                    if next < batch.jobIDs.count { enqueue(next); next += 1 }
+                }
             }
-            guard try await store.claimJob(id: id) != nil else { continue }
-            await execute(jobID: id, batchID: batch.id, index: index,
-                          submission: confirmed, preparedReferences: plan.preparedReferences)
+        } catch {
+            _ = try? await cancelBatch(batchID: batch.id)
+            throw error
         }
         return batch
+    }
+
+    private func runCandidate(jobID: String, batchID: String, index: Int,
+                              submission: BatchSubmission, preparedReferences: [PreparedReference]) async throws {
+        if Task.isCancelled { cancelledBatchIDs.insert(batchID) }
+        if cancelledBatchIDs.contains(batchID) {
+            _ = try? await store.cancelQueued(id: jobID)
+            return
+        }
+        guard try await store.claimJob(id: jobID) != nil else { return }
+        await execute(jobID: jobID, batchID: batchID, index: index,
+                      submission: submission, preparedReferences: preparedReferences)
+        // A child task may be cancelled while an in-flight POST is completing.
+        // Preserve its recorded outcome, then stop every still-queued candidate
+        // before the scheduler can launch another paid call.
+        if Task.isCancelled { _ = try? await cancelBatch(batchID: batchID) }
     }
 
     public func cancelQueued(_ id: String) async throws -> Bool { try await store.cancelQueued(id: id) }

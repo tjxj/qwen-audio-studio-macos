@@ -3,6 +3,7 @@ import StudioCore
 
 struct ParameterInspector: View {
     @Binding var params: GenerationParams
+    var onAddVoice: () -> Void = {}
     @State private var showAdvanced = false
 
     var body: some View {
@@ -11,11 +12,10 @@ struct ParameterInspector: View {
             Text("在脚本的「角色」标签中描述声音、情绪和语气。")
                 .font(.system(size: 12)).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
-            Button {} label: {
+            Button(action: onAddVoice) {
                 Label("添加参考音色", systemImage: "plus").frame(maxWidth: .infinity)
             }
-            .disabled(true)
-            .help("参考音频管理尚未接入")
+            .help("导入、裁剪或复用本机参考音色")
             Divider()
             Text("常用输出设置").font(.system(size: 13, weight: .semibold))
             Picker("格式", selection: $params.format) {
@@ -43,7 +43,7 @@ struct ParameterInspector: View {
             }
             Button("高级设置…") { showAdvanced = true }
                 .sheet(isPresented: $showAdvanced) { advanced }
-            Text("参数随草稿暂存；生成服务尚未接入。")
+            Text("更改随草稿自动保存，生成前会再次校验。")
                 .font(.system(size: 11)).foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 0)

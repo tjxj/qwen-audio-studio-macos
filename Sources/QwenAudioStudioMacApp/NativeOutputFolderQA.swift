@@ -17,7 +17,9 @@ import StudioCore
         window.title = "输出目录验证 · 合成临时数据"
         window.contentView = NSHostingView(rootView: Text("原生文件夹选择与取消验证").padding(40))
         window.center(); window.makeKeyAndOrderFront(nil)
-        DispatchQueue.global().asyncAfter(deadline: .now() + 25) { exit(124) }
+        // On a cold desktop session NSOpenPanel can spend >20 seconds loading
+        // system services before the three-second delayed cancel phase begins.
+        DispatchQueue.global().asyncAfter(deadline: .now() + 70) { exit(124) }
         Task { @MainActor in
             let startedAt = Date()
             func trace(_ phase: String) {

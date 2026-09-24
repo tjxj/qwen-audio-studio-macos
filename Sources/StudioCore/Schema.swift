@@ -3,7 +3,7 @@ import Foundation
 enum StudioSchema {
     static func migrate(_ db: SQLiteConnection) throws {
         let version = try db.rows("PRAGMA user_version").first?.first?.int ?? 0
-        guard version <= 4 else { throw StudioStoreError.unsupportedSchema(version) }
+        guard version <= 5 else { throw StudioStoreError.unsupportedSchema(version) }
         if version == 0 {
         try db.transaction {
             for statement in [
@@ -44,6 +44,16 @@ enum StudioSchema {
             try db.transaction {
                 try db.execute("CREATE TABLE reference_cleanup (reference_id TEXT PRIMARY KEY NOT NULL, snapshot BLOB NOT NULL)")
                 try db.execute("PRAGMA user_version = 4")
+            }
+        }
+        if version < 5 {
+            try db.transaction {
+                try db.execute("CREATE TABLE job_metadata (job_id TEXT PRIMARY KEY NOT NULL REFERENCES jobs(id), name TEXT NOT NULL DEFAULT '', favorite INTEGER NOT NULL DEFAULT 0 CHECK(favorite IN (0,1)), note TEXT NOT NULL DEFAULT '')")
+                try db.execute("CREATE TABLE batch_final (batch_id TEXT PRIMARY KEY NOT NULL REFERENCES batches(id), job_id TEXT NOT NULL REFERENCES jobs(id))")
+                try db.execute("CREATE TABLE project_metadata (project_id TEXT PRIMARY KEY NOT NULL REFERENCES projects(id), archived INTEGER NOT NULL DEFAULT 0 CHECK(archived IN (0,1)))")
+                try db.execute("ALTER TABLE jobs ADD COLUMN created_at_ms INTEGER NOT NULL DEFAULT 0")
+                try db.execute("CREATE TABLE workspace_state (singleton INTEGER PRIMARY KEY CHECK(singleton=1), current_project_id TEXT REFERENCES projects(id))")
+                try db.execute("PRAGMA user_version = 5")
             }
         }
     }

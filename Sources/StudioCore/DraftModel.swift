@@ -80,6 +80,30 @@ public final class DraftController {
         change { $0 = replacement }
     }
 
+    public func load(_ project: ProjectDraft) {
+        debounce?.cancel()
+        debounce = nil
+        draft = project
+        fields = project.fields
+        sampleUntouched = false
+        editVersion += 1
+        savedVersion = editVersion
+        localRecoveryText = nil
+        state = .saved
+    }
+
+    public func beginNew(fields: DraftFields = DraftFields()) {
+        debounce?.cancel()
+        debounce = nil
+        draft = nil
+        self.fields = fields
+        sampleUntouched = false
+        editVersion += 1
+        savedVersion = -1
+        localRecoveryText = nil
+        state = .unsaved
+    }
+
     public func change(_ mutation: (inout DraftFields) -> Void) {
         var updated = fields
         mutation(&updated)

@@ -48,7 +48,7 @@ struct OutputFolderPickerTests {
         let child = Process(); child.executableURL = repo.appendingPathComponent(".build/debug/QwenAudioStudioMacApp")
         child.arguments = ["--verify-folder-dialog-root=" + root.path]
         try child.run()
-        let deadline = Date().addingTimeInterval(30)
+        let deadline = Date().addingTimeInterval(75)
         while child.isRunning && Date() < deadline { try await Task.sleep(for: .milliseconds(100)) }
         if child.isRunning { child.terminate() }
         child.waitUntilExit()

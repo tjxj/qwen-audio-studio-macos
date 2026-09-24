@@ -80,6 +80,42 @@ public struct StoredJob: Equatable, Sendable, Identifiable {
     public let message: String?
 }
 
+public struct JobMetadata: Equatable, Sendable {
+    public let name: String
+    public let favorite: Bool
+    public let note: String
+    public init(name: String = "", favorite: Bool = false, note: String = "") {
+        self.name = name; self.favorite = favorite; self.note = note
+    }
+}
+
+public struct LibraryFilter: Sendable {
+    public var search: String
+    public var mode: CreationMode?
+    public var state: JobState?
+    public var favoriteOnly: Bool
+    public var since: Date?
+    public var beforeID: String?
+    public var limit: Int
+    public init(search: String = "", mode: CreationMode? = nil, state: JobState? = nil,
+                favoriteOnly: Bool = false, since: Date? = nil, beforeID: String? = nil, limit: Int = 50) {
+        self.search = search; self.mode = mode; self.state = state; self.favoriteOnly = favoriteOnly
+        self.since = since; self.beforeID = beforeID; self.limit = limit
+    }
+}
+
+public struct LibraryItem: Sendable {
+    public let job: StoredJob
+    public let project: ProjectDraft
+    public let metadata: JobMetadata
+    public let createdAt: Date
+}
+
+public struct LibraryPage: Sendable {
+    public let items: [LibraryItem]
+    public let nextBeforeID: String?
+}
+
 /// Worker-only receipt. Keep out of exports and list rows: the URL can contain a
 /// short-lived signature. Diagnostics intentionally never print its fields.
 public struct ProviderResponseSnapshot: Codable, Equatable, Sendable, CustomStringConvertible, CustomDebugStringConvertible {

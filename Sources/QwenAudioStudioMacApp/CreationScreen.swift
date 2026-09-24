@@ -10,10 +10,14 @@ struct CreationScreen: View {
     var sharedUndoManager: UndoManager? = nil
     @Environment(StudioPreferences.self) private var preferences
     var editor = PromptEditorHandle()
+    var appState: AppState? = nil
     @FocusState private var titleFocused: Bool
 
     private func field<Value>(_ key: WritableKeyPath<DraftFields, Value>) -> Binding<Value> {
         Binding(get: { draft.fields[keyPath: key] }, set: { value in draft.change { $0[keyPath: key] = value } })
+    }
+    private var canGenerate: Bool {
+        appState != nil && appState?.preparing != true && appState?.submitting != true && draft.state != .conflict
     }
 
     var body: some View {
@@ -27,7 +31,14 @@ struct CreationScreen: View {
         .padding(.bottom, 20)
         .background(StudioPalette.background)
         .navigationTitle("创作台")
-        .task { editor.focus(); try? await draft.saveNow() }
+        .task { editor.focus(); if appState == nil { try? await draft.saveNow() } }
+        .sheet(isPresented: Binding(get: { appState?.generationPlan != nil }, set: { if !$0 { appState?.generationPlan = nil } })) {
+            if let appState, let plan = appState.generationPlan {
+                GenerationSheet(plan: plan, directoryName: outputFolderName, service: appState.generation,
+                    onConfirm: { hash, id in appState.submit(plan: plan, hash: hash, requestID: id) },
+                    onCancel: { appState.generationPlan = nil })
+            }
+        }
         .sheet(isPresented: $showsVoiceSheet) {
             if let service = outputFolders.referenceAudio { VoiceSheet(controller: VoiceSheetController(service: service), draft: draft) }
         }
@@ -37,7 +48,7 @@ struct CreationScreen: View {
                     Label("保存草稿", systemImage: "square.and.arrow.down")
                 }
                 .disabled(draft.state == .conflict)
-                .help("暂存当前会话的草稿（⌘S）")
+                .help("保存到本地作品库（⌘S）")
             }
         }
     }
@@ -55,6 +66,15 @@ struct CreationScreen: View {
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(draft.state == .conflict ? Color.orange : .secondary)
                 .fixedSize()
+            if let appState {
+                Menu {
+                    Button("空白草稿") { Task { await appState.newBlankDraft() } }
+                } label: { Image(systemName: "ellipsis") }
+                    .menuStyle(.borderlessButton)
+                    .fixedSize()
+                    .help("草稿操作")
+                    .accessibilityLabel("草稿操作")
+            }
         }
         .frame(height: 42)
     }
@@ -63,7 +83,7 @@ struct CreationScreen: View {
         switch draft.state {
         case .unsaved: "有未保存更改"
         case .saving: "正在暂存…"
-        case .saved: "已暂存 · 本次会话"
+        case .saved: "已保存到本地"
         case .conflict: "版本冲突 · 本地稿已保留"
         case .failed: "暂存失败 · 可重试"
         }
@@ -101,7 +121,7 @@ struct CreationScreen: View {
             HStack(spacing: 0) {
                 scriptPane
                 Divider()
-                ParameterInspector(params: field(\.params)).frame(width: 258)
+                ParameterInspector(params: field(\.params), onAddVoice: { showsVoiceSheet = true }).frame(width: 258)
             }
             .frame(maxHeight: .infinity)
             if draft.state == .conflict {
@@ -201,20 +221,34 @@ struct CreationScreen: View {
                     } else { outputFolderName = "尚未选择输出目录" }
                 }
                 if let message = outputFolders.errorMessage { Text(message).font(.caption).foregroundStyle(.red).lineLimit(2) }
-                Text("草稿暂存在内存，关闭应用后不保留。")
-                    .font(.system(size: 10))
+                if let appState, appState.submitting {
+                    let stages = appState.jobStage.values.map(\.rawValue).sorted().joined(separator: " · ")
+                    Text(stages.isEmpty ? "正在建立任务记录…" : "任务阶段：\(stages)")
+                        .font(.system(size: 10)).lineLimit(1)
+                }
+                if let error = appState?.errorMessage { Text(error).font(.system(size: 10)).foregroundStyle(.red).lineLimit(2) }
             }
             .font(.system(size: 12)).foregroundStyle(.secondary)
             Spacer()
-            Text("候选 1").font(.system(size: 12)).foregroundStyle(.secondary)
-            Button {} label: {
-                Label("生成音频", systemImage: "waveform")
+            if let appState {
+                if appState.submitting, appState.activeBatchID != nil {
+                    Button("取消未开始候选") { Task { await appState.cancelRemaining() } }
+                        .font(.system(size: 11)).buttonStyle(.borderless)
+                }
+                Picker("候选数", selection: Binding(get: { appState.candidateCount }, set: { appState.candidateCount = $0; preferences.defaultCandidates = $0 })) {
+                    ForEach(1...3, id: \.self) { Text("\($0) 个候选").tag($0) }
+                }.frame(width: 150)
+            }
+            Button { Task { await appState?.preflight() } } label: {
+                Label(appState?.preparing == true ? "正在预检" : appState?.submitting == true ? "正在生成" : "生成音频", systemImage: "waveform")
                     .font(.system(size: 13, weight: .semibold))
                     .frame(width: 126, height: 31)
+                    .foregroundStyle(canGenerate ? Color.white : Color.secondary)
+                    .background(canGenerate ? StudioPalette.green : Color.gray.opacity(0.18), in: RoundedRectangle(cornerRadius: 8))
             }
-            .buttonStyle(.borderedProminent)
-            .disabled(true)
-            .help("生成服务将在后续版本接入")
+            .buttonStyle(.plain)
+            .disabled(!canGenerate)
+            .help("预检后确认调用次数与可能费用")
         }
         .padding(.horizontal, 18)
         .frame(height: 63)

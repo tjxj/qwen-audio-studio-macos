@@ -17,4 +17,19 @@ import StudioCore
         form.remove(id: identity)
         #expect(form.variables.map(\.key) == ["other"])
     }
+    @Test func numericDraftKeepsIntermediateInputUntilSave() throws {
+        let form = TemplateVariableForm(variables: [
+            .init(key: "duration", label: "时长", type: .number, defaultValue: .number(1))
+        ])
+        let id = form.rows[0].id
+        form.setDefaultText(id: id, text: "-")
+        #expect(form.rows[0].defaultText == "-")
+        #expect(throws: TemplateError.self) { try form.validatedVariables() }
+        form.setDefaultText(id: id, text: "")
+        #expect(form.rows[0].defaultText.isEmpty)
+        #expect(throws: TemplateError.self) { try form.validatedVariables() }
+        form.setDefaultText(id: id, text: "1.")
+        #expect(form.rows[0].defaultText == "1.")
+        #expect(try form.validatedVariables()[0].defaultValue == .number(1))
+    }
 }

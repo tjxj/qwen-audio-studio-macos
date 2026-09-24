@@ -50,6 +50,14 @@ public actor StudioStore {
     public func listProjects() throws -> [ProjectDraft] {
         try db.rows("SELECT id,revision,fields FROM projects ORDER BY rowid DESC").map(project)
     }
+    public func currentProjectID() throws -> String? {
+        try db.rows("SELECT current_project_id FROM workspace_state WHERE singleton=1").first?.first?.string
+    }
+    public func setCurrentProject(id: String?) throws {
+        if let id, try getProject(id: id) == nil { throw StudioStoreError.missing }
+        try db.execute("INSERT INTO workspace_state(singleton,current_project_id) VALUES(1,?) ON CONFLICT(singleton) DO UPDATE SET current_project_id=excluded.current_project_id",
+                       [id.map(SQLiteValue.text) ?? .null])
+    }
     private func project(_ row: [SQLiteValue]) throws -> ProjectDraft {
         guard let id = row[0].string, let revision = row[1].int else { throw StudioStoreError.corruptRecord }
         return ProjectDraft(id: id, fields: try storeDecode(DraftFields.self, row[2]), revision: revision)
@@ -226,8 +234,8 @@ public actor StudioStore {
             var jobIDs: [String] = []
             for (index, seed) in submission.candidateSeeds.enumerated() {
                 let jobID = "job_" + UUID().uuidString
-                try db.execute("INSERT INTO jobs(id,batch_id,candidate_index,seed,state) VALUES(?,?,?,?,'queued')",
-                               [.text(jobID), .text(id), .integer(index), .integer(seed)])
+                try db.execute("INSERT INTO jobs(id,batch_id,candidate_index,seed,state,created_at_ms) VALUES(?,?,?,?,'queued',?)",
+                               [.text(jobID), .text(id), .integer(index), .integer(seed), .integer(Int(Date().timeIntervalSince1970 * 1000))])
                 for reference in submission.references {
                     try db.execute("INSERT INTO reference_leases(job_id,reference_id) VALUES(?,?)", [.text(jobID), .text(reference.id)])
                 }
@@ -259,6 +267,64 @@ public actor StudioStore {
     }
     public func listRemovedJobs() throws -> [StoredJob] {
         try db.rows("SELECT \(Self.jobColumns) FROM jobs WHERE id IN (SELECT job_id FROM removed_jobs) ORDER BY rowid DESC").map(job)
+    }
+    public func getJobMetadata(id: String) throws -> JobMetadata? {
+        guard try getJob(id: id) != nil else { return nil }
+        guard let row = try db.rows("SELECT name,favorite,note FROM job_metadata WHERE job_id=?", [.text(id)]).first else { return JobMetadata() }
+        guard let name = row[0].string, let favorite = row[1].int, let note = row[2].string else { throw StudioStoreError.corruptRecord }
+        return JobMetadata(name: name, favorite: favorite != 0, note: note)
+    }
+    public func updateJobMetadata(id: String, name: String, favorite: Bool, note: String) throws {
+        guard try getJob(id: id) != nil, name.count <= 200, note.count <= 2000 else { throw StudioStoreError.invalidSubmission }
+        try db.execute("INSERT INTO job_metadata(job_id,name,favorite,note) VALUES(?,?,?,?) ON CONFLICT(job_id) DO UPDATE SET name=excluded.name,favorite=excluded.favorite,note=excluded.note",
+                       [.text(id), .text(name), .integer(favorite ? 1 : 0), .text(note)])
+    }
+    public func setFinalJob(batchID: String, jobID: String) throws {
+        guard let job = try getJob(id: jobID), job.batchID == batchID, job.state == .success else { throw StudioStoreError.invalidSubmission }
+        try db.execute("INSERT INTO batch_final(batch_id,job_id) VALUES(?,?) ON CONFLICT(batch_id) DO UPDATE SET job_id=excluded.job_id", [.text(batchID), .text(jobID)])
+    }
+    public func finalJobID(batchID: String) throws -> String? {
+        try db.rows("SELECT job_id FROM batch_final WHERE batch_id=?", [.text(batchID)]).first?.first?.string
+    }
+    public func setProjectArchived(id: String, archived: Bool) throws {
+        guard try getProject(id: id) != nil else { throw StudioStoreError.missing }
+        try db.execute("INSERT INTO project_metadata(project_id,archived) VALUES(?,?) ON CONFLICT(project_id) DO UPDATE SET archived=excluded.archived", [.text(id), .integer(archived ? 1 : 0)])
+    }
+    public func projectArchived(id: String) throws -> Bool {
+        (try db.rows("SELECT archived FROM project_metadata WHERE project_id=?", [.text(id)]).first?.first?.int ?? 0) != 0
+    }
+    public func libraryPage(_ filter: LibraryFilter) throws -> LibraryPage {
+        let limit = min(max(filter.limit, 1), 100)
+        var clauses = ["j.id NOT IN (SELECT job_id FROM removed_jobs)"]
+        var parameters: [SQLiteValue] = []
+        if let state = filter.state { clauses.append("j.state=?"); parameters.append(.text(state.rawValue)) }
+        if let mode = filter.mode { clauses.append("json_extract(CAST(p.fields AS TEXT),'$.mode')=?"); parameters.append(.text(mode.rawValue)) }
+        if filter.favoriteOnly { clauses.append("COALESCE(m.favorite,0)=1") }
+        if let since = filter.since { clauses.append("j.created_at_ms>=?"); parameters.append(.integer(Int(since.timeIntervalSince1970 * 1000))) }
+        if !filter.search.isEmpty {
+            clauses.append("(p.id LIKE ? OR COALESCE(m.name,'') LIKE ? OR CAST(p.fields AS TEXT) LIKE ?)")
+            let search = "%\(filter.search)%"
+            parameters += [.text(search), .text(search), .text(search)]
+        }
+        if let beforeID = filter.beforeID {
+            guard let before = try db.rows("SELECT rowid FROM jobs WHERE id=?", [.text(beforeID)]).first?.first?.int else { return LibraryPage(items: [], nextBeforeID: nil) }
+            clauses.append("j.rowid<?"); parameters.append(.integer(before))
+        }
+        parameters.append(.integer(limit + 1))
+        let sql = "SELECT j.\(Self.jobColumns.replacingOccurrences(of: ",", with: ",j.")),p.id,p.revision,p.fields,COALESCE(m.name,''),COALESCE(m.favorite,0),COALESCE(m.note,''),j.created_at_ms FROM jobs j JOIN batches b ON j.batch_id=b.id JOIN projects p ON b.project_id=p.id LEFT JOIN job_metadata m ON m.job_id=j.id WHERE \(clauses.joined(separator: " AND ")) ORDER BY j.rowid DESC LIMIT ?"
+        let rows = try db.rows(sql, parameters)
+        let visible = Array(rows.prefix(limit))
+        let items = try visible.map { row -> LibraryItem in
+            let storedJob = try job(Array(row[0..<7]))
+            guard let projectID = row[7].string, let revision = row[8].int,
+                  let name = row[10].string, let favorite = row[11].int, let note = row[12].string,
+                  let created = row[13].int else { throw StudioStoreError.corruptRecord }
+            let fields = try storeDecode(DraftFields.self, row[9])
+            return LibraryItem(job: storedJob, project: ProjectDraft(id: projectID, fields: fields, revision: revision),
+                               metadata: JobMetadata(name: name, favorite: favorite != 0, note: note),
+                               createdAt: created == 0 ? .distantPast : Date(timeIntervalSince1970: Double(created) / 1000))
+        }
+        return LibraryPage(items: items, nextBeforeID: rows.count > limit ? visible.last?[0].string : nil)
     }
     public func claimJob(id: String) throws -> StoredJob? {
         try db.transaction {

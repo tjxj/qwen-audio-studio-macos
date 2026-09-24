@@ -7,6 +7,8 @@ final class TemplateLibraryController {
     private let store: (any TemplateStore)?
     private(set) var templates: [StudioTemplate] = []
     private(set) var favorites: Set<String> = []
+    private(set) var lastRemoved: StudioTemplate?
+    private var lastRemovedWasFavorite = false
     var error: String?
 
     init(store: (any TemplateStore)? = nil) {
@@ -25,7 +27,22 @@ final class TemplateLibraryController {
     }
     func remove(_ item: StudioTemplate) async {
         guard let store else { return }
-        do { try await store.remove(id: item.id); await reload() }
+        do {
+            let wasFavorite = favorites.contains(item.id)
+            try await store.remove(id: item.id)
+            lastRemoved = item; lastRemovedWasFavorite = wasFavorite
+            await reload()
+        }
+        catch { self.error = error.localizedDescription }
+    }
+    func undoLastRemoval() async {
+        guard let store, let item = lastRemoved else { return }
+        do {
+            try await store.save(item)
+            if lastRemovedWasFavorite { try await store.setFavorite(id: item.id, favorite: true) }
+            lastRemoved = nil; lastRemovedWasFavorite = false
+            await reload()
+        }
         catch { self.error = error.localizedDescription }
     }
     func favorite(_ item: StudioTemplate) async {
@@ -63,10 +80,14 @@ struct TemplateScreen: View {
             HStack {
                 VStack(alignment: .leading, spacing: 5) {
                     Text("从一个灵感开始").font(StudioTypography.serif(32))
-                    Text("42 个内置场景 · 自建模板与收藏仅保留本次会话")
+                    Text("42 个内置场景 · 自建模板与收藏保存在本机")
                         .font(.system(size: 12)).foregroundStyle(.secondary)
                 }
                 Spacer()
+                if library.lastRemoved != nil {
+                    Button("撤销移除", systemImage: "arrow.uturn.backward") { Task { await library.undoLastRemoval() } }
+                        .buttonStyle(.borderless)
+                }
                 Button("自建模板", systemImage: "plus") {
                     editing = StudioTemplate(name: "新模板", mode: mode ?? .podcast, promptPattern: "【对白：讲述者】从这里开始。")
                 }.buttonStyle(.bordered)
@@ -107,7 +128,7 @@ struct TemplateScreen: View {
         }
         .confirmationDialog("移除这个自建模板？", isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } }), titleVisibility: .visible) {
             Button("移除模板", role: .destructive) { if let removing { Task { await library.remove(removing) } }; removing = nil }
-        } message: { Text("仅移除当前会话中的模板，已应用的创作稿会保留。") }
+        } message: { Text("移除自建模板后，已应用的创作稿会保留。") }
         .alert("模板操作未完成", isPresented: Binding(get: { library.error != nil }, set: { if !$0 { library.error = nil } })) {
             Button("知道了", role: .cancel) { library.error = nil }
         } message: { Text(library.error ?? "") }
@@ -279,7 +300,7 @@ private struct TemplateEditorSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("编辑自己的模板").font(StudioTypography.serif(26))
-            Text("只保留本次会话 · 正文用 {{变量名}} 引用变量").font(.caption).foregroundStyle(.secondary)
+            Text("保存在本机 · 正文用 {{变量名}} 引用变量").font(.caption).foregroundStyle(.secondary)
             HStack { TextField("模板名称", text: $item.name); Picker("模式", selection: $item.mode) { ForEach(CreationMode.allCases) { Text($0.title).tag($0) } }.frame(width: 210) }
             TextField("模板说明", text: $item.description)
             Picker("编辑内容", selection: $selectedTab) { Text("正文").tag(0); Text("变量定义").tag(1) }.pickerStyle(.segmented)
@@ -295,7 +316,7 @@ private struct TemplateEditorSheet: View {
                 Button("取消") { dismiss() }.keyboardShortcut(.cancelAction)
                 Button(saving ? "保存中…" : "保存模板") {
                     do {
-                        item.variables = variableForm.variables
+                        item.variables = try variableForm.validatedVariables()
                         try TemplateEngine.validate(item)
                         saving = true
                         Task { if await library.save(item) { onSaved(item.id) }; saving = false }
