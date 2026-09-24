@@ -106,7 +106,7 @@ final class SecureDownloadRedirects: NSObject, URLSessionTaskDelegate, @unchecke
 public actor GenerationService {
     private enum AuthorizationState {
         case ready
-        case committing(cancelRequested: Bool)
+        case committing(task: Task<StoredBatch, Error>, cancelRequested: Bool)
         case committed(batchID: String)
         case revoked(batchID: String)
     }
@@ -170,8 +170,8 @@ public actor GenerationService {
             guard existing.previewHash == plan.confirmationHash else { throw StudioStoreError.requestConflict }
             switch existing.state {
             case .committed: return existing.authorization
-            case .revoked, .committing(cancelRequested: true): throw GenerationError.confirmationMismatch
-            case .committing(cancelRequested: false): return existing.authorization
+            case .revoked, .committing(_, true): throw GenerationError.confirmationMismatch
+            case .committing(_, false): return existing.authorization
             case .ready: break
             }
             let consent = existing.authorization.submission.consent
@@ -201,8 +201,8 @@ public actor GenerationService {
               stored.authorization.confirmationHash == authorization.confirmationHash else { return }
         switch stored.state {
         case .ready: authorizations.removeValue(forKey: authorization.clientRequestID)
-        case .committing:
-            stored.state = .committing(cancelRequested: true)
+        case .committing(let task, _):
+            stored.state = .committing(task: task, cancelRequested: true)
             authorizations[authorization.clientRequestID] = stored
         case .committed, .revoked: break
         }
@@ -213,16 +213,35 @@ public actor GenerationService {
               try plan.submission.requestHash() == plan.confirmationHash,
               let stored = authorizations[clientRequestID], stored.previewHash == plan.confirmationHash,
               stored.authorization.confirmationHash == confirmedHash else { throw GenerationError.confirmationMismatch }
+        let task: Task<StoredBatch, Error>
         switch stored.state {
         case .committed(let id):
             guard let batch = try await store.getBatch(id: id) else { throw StudioStoreError.corruptRecord }
             return batch
-        case .revoked, .committing(cancelRequested: true): throw GenerationError.confirmationMismatch
+        case .revoked, .committing(_, true): throw GenerationError.confirmationMismatch
         case .ready:
-            authorizations[clientRequestID]?.state = .committing(cancelRequested: false)
-        case .committing(cancelRequested: false): break
+            // Install the sole owner before yielding the actor. Reentrant calls
+            // share its result and never enter the persistence boundary again.
+            task = Task {
+                try await self.commitAndExecute(plan, authorization: stored.authorization)
+            }
+            authorizations[clientRequestID]?.state = .committing(task: task, cancelRequested: false)
+        case .committing(let existing, false): task = existing
         }
-        let confirmed = stored.authorization.submission
+        // Any caller cancelling this same submission stops its queued work.
+        // Forward cancellation synchronously so it cannot race an actor hop
+        // after the commit returns and allow an unauthorized paid POST.
+        return try await withTaskCancellationHandler {
+            try await task.value
+        } onCancel: {
+            task.cancel()
+        }
+    }
+
+    private func commitAndExecute(_ plan: GenerationPlan, authorization: GenerationAuthorization) async throws -> StoredBatch {
+        let clientRequestID = authorization.clientRequestID
+        let confirmedHash = authorization.confirmationHash
+        let confirmed = authorization.submission
         // createBatch durably commits the complete snapshot before any paid request.
         let batch: StoredBatch
         do { batch = try await batchCommitter.createBatch(confirmed) }
@@ -230,10 +249,13 @@ public actor GenerationService {
             if var latest = authorizations[clientRequestID],
                latest.authorization.confirmationHash == confirmedHash {
                 switch latest.state {
-                case .committing(cancelRequested: true): authorizations.removeValue(forKey: clientRequestID)
-                case .committing(cancelRequested: false):
-                    latest.state = .ready
-                    authorizations[clientRequestID] = latest
+                case .committing(_, let cancelRequested):
+                    if cancelRequested || Task.isCancelled {
+                        authorizations.removeValue(forKey: clientRequestID)
+                    } else {
+                        latest.state = .ready
+                        authorizations[clientRequestID] = latest
+                    }
                 case .ready, .committed, .revoked: break
                 }
             }
@@ -246,13 +268,14 @@ public actor GenerationService {
             throw GenerationError.confirmationMismatch
         }
         switch latest.state {
-        case .committing(cancelRequested: true):
-            latest.state = .revoked(batchID: batch.id)
-            authorizations[clientRequestID] = latest
-            cancelledBatchIDs.insert(batch.id)
-            for id in batch.jobIDs { _ = try? await store.cancelQueued(id: id) }
-            return batch
-        case .committing(cancelRequested: false):
+        case .committing(_, let cancelRequested):
+            if cancelRequested || Task.isCancelled {
+                latest.state = .revoked(batchID: batch.id)
+                authorizations[clientRequestID] = latest
+                cancelledBatchIDs.insert(batch.id)
+                for id in batch.jobIDs { _ = try? await store.cancelQueued(id: id) }
+                return batch
+            }
             latest.state = .committed(batchID: batch.id)
             authorizations[clientRequestID] = latest
         case .committed(let id):

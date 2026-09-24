@@ -22,14 +22,16 @@ private actor PausedBatchCommitter: BatchCommitting {
     private let store: StudioStore
     private var entered = 0
     private var entryWaiters: [(Int, CheckedContinuation<Void, Never>)] = []
-    private var releaseWaiters: [CheckedContinuation<Void, Never>] = []
+    private var releaseWaiters: [Int: CheckedContinuation<Bool, Never>] = [:]
     init(store: StudioStore) { self.store = store }
     func createBatch(_ submission: BatchSubmission) async throws -> StoredBatch {
         entered += 1
+        let attempt = entered
         let ready = entryWaiters.filter { $0.0 <= entered }
         entryWaiters.removeAll { $0.0 <= entered }
         ready.forEach { $0.1.resume() }
-        await withCheckedContinuation { releaseWaiters.append($0) }
+        let succeeds = await withCheckedContinuation { releaseWaiters[attempt] = $0 }
+        guard succeeds else { throw CommitFailure.synthetic }
         return try await store.createBatch(submission)
     }
     func waitForEntries(_ count: Int) async {
@@ -38,12 +40,42 @@ private actor PausedBatchCommitter: BatchCommitting {
     }
     func releaseAll() {
         let waiting = releaseWaiters
-        releaseWaiters = []
-        waiting.forEach { $0.resume() }
+        releaseWaiters = [:]
+        waiting.values.forEach { $0.resume(returning: true) }
     }
+    func release(_ attempt: Int, succeeds: Bool) { releaseWaiters.removeValue(forKey: attempt)?.resume(returning: succeeds) }
+    func attempts() -> Int { entered }
+}
+
+private enum CommitFailure: Error { case synthetic }
+
+private extension GenerationService {
+    func submitReportingSuspension(_ plan: GenerationPlan, authorization: GenerationAuthorization,
+                                   signal: @escaping @Sendable () -> Void) async throws -> StoredBatch {
+        // This actor-inheriting task can report only once submit below yields.
+        // submit is actor-isolated too: it reaches its first persistence/shared
+        // result wait before this queued actor work can run.
+        Task { self.reportSuspension(signal) }
+        return try await submit(plan, confirmedHash: authorization.confirmationHash,
+                                clientRequestID: authorization.clientRequestID)
+    }
+    func reportSuspension(_ signal: @Sendable () -> Void) { signal() }
 }
 
 struct GenerationServiceTests {
+    private func startSuspendedSubmit(_ service: GenerationService, _ plan: GenerationPlan,
+                                      _ authorization: GenerationAuthorization) async -> Task<StoredBatch, Error> {
+        let (stream, continuation) = AsyncStream<Void>.makeStream()
+        let task = Task {
+            try await service.submitReportingSuspension(plan, authorization: authorization) {
+                continuation.yield(())
+                continuation.finish()
+            }
+        }
+        for await _ in stream { break }
+        return task
+    }
+
     private func fixture() throws -> (URL, StudioStore, OutputDirectoryStore, GeneratedAssetStore, FakeSynthesizer, GenerationService) {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("generation-test-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -133,15 +165,77 @@ struct GenerationServiceTests {
         let request = try await input(root, store, dirs)
         let plan = try await service.preflight(request)
         let authorization = try await service.confirm(plan)
-        let first = Task { try await service.submit(plan, confirmedHash: authorization.confirmationHash,
-                                                    clientRequestID: request.clientRequestID) }
-        let second = Task { try await service.submit(plan, confirmedHash: authorization.confirmationHash,
-                                                     clientRequestID: request.clientRequestID) }
-        await gate.waitForEntries(2)
+        let first = await startSuspendedSubmit(service, plan, authorization)
+        await gate.waitForEntries(1)
+        let second = await startSuspendedSubmit(service, plan, authorization)
+        #expect(await gate.attempts() == 1)
         await gate.releaseAll()
         let a = try await first.value, b = try await second.value
         #expect(a.id == b.id)
         #expect(await fake.calls().count == 1)
+        try await store.close()
+    }
+
+    // The second persistence attempt is deliberately configured to succeed if a
+    // regression lets it enter. Failure of the first must reach both callers;
+    // no second durable batch or paid POST may escape that shared result.
+    @Test(arguments: ["none", "revoke", "ownerCancel", "duplicateCancel"], [false, true])
+    func concurrentCommitSharesOneOutcome(cancellation: String, succeeds: Bool) async throws {
+        let (root, store, dirs, assets, fake, _) = try fixture(); defer { try? FileManager.default.removeItem(at: root) }
+        let gate = PausedBatchCommitter(store: store)
+        let service = GenerationService(store: store, directories: dirs, assets: assets, synthesizer: fake,
+                                        downloader: FakeAudioDownloader(), batchCommitter: gate)
+        let request = try await input(root, store, dirs, candidates: 2)
+        let plan = try await service.preflight(request)
+        let authorization = try await service.confirm(plan)
+        let first = await startSuspendedSubmit(service, plan, authorization)
+        await gate.waitForEntries(1)
+        let second = await startSuspendedSubmit(service, plan, authorization)
+        #expect(await gate.attempts() == 1)
+        switch cancellation {
+        case "revoke": await service.revokeAuthorization(authorization)
+        case "ownerCancel": first.cancel()
+        case "duplicateCancel": second.cancel()
+        default: break
+        }
+        await gate.release(1, succeeds: succeeds)
+        let a = await first.result
+        await gate.releaseAll()
+        let b = await second.result
+        #expect(await gate.attempts() == 1)
+        if succeeds {
+            let firstBatch = try a.get(), secondBatch = try b.get()
+            #expect(firstBatch.id == secondBatch.id)
+            for id in firstBatch.jobIDs {
+                #expect(try await store.getJob(id: id)?.state == (cancellation == "none" ? .success : .cancelled))
+            }
+            #expect(await fake.calls().count == (cancellation == "none" ? 2 : 0))
+        } else {
+            for result in [a, b] {
+                switch result {
+                case .success: Issue.record("A failed commit must fail every concurrent caller")
+                case .failure(let error): #expect(error is CommitFailure)
+                }
+            }
+            #expect(try await store.listLibrary().isEmpty)
+            #expect(await fake.calls().isEmpty)
+        }
+        if cancellation != "none", await gate.attempts() == 1 {
+            await #expect(throws: GenerationError.confirmationMismatch) {
+                try await service.submit(plan, confirmedHash: authorization.confirmationHash,
+                                         clientRequestID: request.clientRequestID)
+            }
+        } else if !succeeds, await gate.attempts() == 1 {
+            // A new explicit attempt after the shared failure may succeed;
+            // joining that failed attempt never performs this retry implicitly.
+            let retry = await startSuspendedSubmit(service, plan, authorization)
+            await gate.waitForEntries(2)
+            await gate.releaseAll()
+            let batch = try await retry.value
+            #expect(await gate.attempts() == 2)
+            #expect(await fake.calls().count == 2)
+            for id in batch.jobIDs { #expect(try await store.getJob(id: id)?.state == .success) }
+        }
         try await store.close()
     }
 
