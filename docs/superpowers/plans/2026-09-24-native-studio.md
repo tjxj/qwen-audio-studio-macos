@@ -82,9 +82,9 @@
 
 **Interfaces:** `OutputDirectoryStore.register(selectedURL:) -> DirectoryID`, `resolveForJob(_:directoryID:) throws -> URL`; `GeneratedAssetStore.trash(job:scope:) / restore(job:)`.
 
-- [ ] Add red tests for cancel preserving current selection, Chinese/space names, unreadable/disconnected volume, bookmark reopen, unique job paths, record-only removal and generated-files trash/restore with conflicting target names.
-- [ ] Integrate NSOpenPanel and security-scoped bookmarks, register only authorized URLs, write `prompt.txt` and reports beside each generated asset. Add Finder reveal for registered assets/directories.
-- [ ] Run green and test the real dialog on a Mac. Commit.
+- [x] Add red tests for cancel preserving current selection, Chinese/space names, unreadable/disconnected volume, bookmark reopen, unique job paths, record-only removal and generated-files trash/restore with conflicting target names.
+- [x] Integrate NSOpenPanel and security-scoped bookmarks, register only authorized URLs, write `prompt.txt` and reports beside each generated asset. Add Finder reveal for registered assets/directories.
+- [x] Run green and test the real dialog on a Mac. Commit.
 
 ### Task 6: Keychain, Next client and paid-request state machine
 
