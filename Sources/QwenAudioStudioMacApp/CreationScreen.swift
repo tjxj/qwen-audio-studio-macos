@@ -4,8 +4,9 @@ import AppKit
 
 struct CreationScreen: View {
     let draft: DraftController
+    var sharedUndoManager: UndoManager? = nil
     @Environment(StudioPreferences.self) private var preferences
-    @State private var editor = PromptEditorHandle()
+    var editor = PromptEditorHandle()
     @FocusState private var titleFocused: Bool
 
     private func field<Value>(_ key: WritableKeyPath<DraftFields, Value>) -> Binding<Value> {
@@ -23,7 +24,7 @@ struct CreationScreen: View {
         .padding(.bottom, 20)
         .background(StudioPalette.background)
         .navigationTitle("创作台")
-        .task { try? await draft.saveNow() }
+        .task { editor.focus(); try? await draft.saveNow() }
         .toolbar {
             ToolbarItem(placement: .primaryAction) {
                 Button { Task { try? await draft.saveNow() } } label: {
@@ -133,7 +134,7 @@ struct CreationScreen: View {
                 insertButton("音乐", tag: "【音乐】")
                 Spacer(minLength: 0)
             }
-            PromptEditor(text: field(\.prompt), font: preferences.scriptFont.font(size: preferences.scriptSize), handle: editor)
+            PromptEditor(text: field(\.prompt), font: preferences.scriptFont.font(size: preferences.scriptSize), handle: editor, sharedUndoManager: sharedUndoManager)
                 .background(StudioPalette.background, in: RoundedRectangle(cornerRadius: 9))
                 .overlay(RoundedRectangle(cornerRadius: 9).stroke(StudioPalette.stroke))
                 .clipShape(RoundedRectangle(cornerRadius: 9))

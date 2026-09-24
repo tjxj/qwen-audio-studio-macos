@@ -33,15 +33,22 @@ private enum StudioPage: String, CaseIterable, Identifiable {
 
 struct AppShell: View {
     @State private var draft: DraftController
+    @State private var templateApplication: TemplateApplicationController
+    @State private var templateLibrary = TemplateLibraryController()
+    @State private var promptEditor = PromptEditorHandle()
     @State private var selection: StudioPage? = ProcessInfo.processInfo.arguments.contains("--capture-page=templates") ? .templates : .creation
     @Environment(\.openSettings) private var openSettings
     @Environment(\.colorScheme) private var colorScheme
 
-    init() {
+    init(qaMode: Bool = false) {
         let longScript = ProcessInfo.processInfo.arguments.contains("--capture-long-script")
         let fields: DraftFields? = longScript ? DraftFields(name: "长脚本布局验证", prompt:
-            Array(repeating: DraftController.sample(for: .podcast), count: 20).joined(separator: "\n\n")) : nil
-        _draft = State(initialValue: DraftController(fields: fields, store: InMemoryDraftStore()))
+            Array(repeating: DraftController.sample(for: .podcast), count: 20).joined(separator: "\n\n")) :
+            (qaMode ? DraftFields(name: "雨夜里的慢生活", prompt: DraftController.sample(for: .podcast)) : nil)
+        // QA uses these in-memory adapters explicitly; never inject production persistence here.
+        let controller = DraftController(fields: fields, store: InMemoryDraftStore())
+        _draft = State(initialValue: controller)
+        _templateApplication = State(initialValue: TemplateApplicationController(draft: controller))
     }
 
     var body: some View {
@@ -102,9 +109,9 @@ struct AppShell: View {
         } detail: {
             Group {
                 switch selection ?? .creation {
-                case .creation: CreationScreen(draft: draft)
+                case .creation: CreationScreen(draft: draft, sharedUndoManager: templateApplication.undoManager, editor: promptEditor)
                 case .library: LibraryScreen()
-                case .templates: TemplateScreen()
+                case .templates: TemplateScreen(library: templateLibrary, application: templateApplication) { selection = .creation }
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)

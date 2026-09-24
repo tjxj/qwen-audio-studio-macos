@@ -3,6 +3,8 @@ import AppKit
 
 @MainActor final class PromptEditorHandle {
     weak var textView: NSTextView?
+    // Keep native text storage alive when the user visits another page; undo targets it.
+    var retainedScrollView: NSScrollView?
 
     func insert(_ text: String) {
         guard let textView else { return }
@@ -21,16 +23,28 @@ struct PromptEditor: NSViewRepresentable {
     @Binding var text: String
     let font: NSFont
     let handle: PromptEditorHandle
+    var sharedUndoManager: UndoManager? = nil
 
     func makeCoordinator() -> Coordinator { Coordinator(self) }
 
     func makeNSView(context: Context) -> NSScrollView {
+        if let scroll = handle.retainedScrollView, let editor = scroll.documentView as? StudioTextView {
+            editor.delegate = context.coordinator
+            context.coordinator.editor = editor
+            context.coordinator.lastSynchronizedText = text
+            editor.sharedUndoManager = sharedUndoManager
+            if editor.string != text { editor.breakUndoCoalescing(); editor.string = text }
+            handle.textView = editor
+            applyStyle(editor)
+            return scroll
+        }
         let scroll = NSScrollView()
         scroll.hasVerticalScroller = true
         scroll.hasHorizontalScroller = false
         scroll.autohidesScrollers = true
         scroll.drawsBackground = false
-        let editor = NSTextView()
+        let editor = StudioTextView()
+        editor.sharedUndoManager = sharedUndoManager
         editor.isRichText = false
         editor.allowsUndo = true
         editor.isAutomaticQuoteSubstitutionEnabled = false
@@ -52,7 +66,9 @@ struct PromptEditor: NSViewRepresentable {
         context.coordinator.editor = editor
         scroll.documentView = editor
         editor.string = text
+        context.coordinator.lastSynchronizedText = text
         handle.textView = editor
+        if sharedUndoManager != nil { handle.retainedScrollView = scroll }
         applyStyle(editor)
         return scroll
     }
@@ -61,11 +77,13 @@ struct PromptEditor: NSViewRepresentable {
         context.coordinator.parent = self
         guard let editor = scroll.documentView as? NSTextView else { return }
         if editor.string != text && !editor.hasMarkedText() {
+            editor.breakUndoCoalescing()
             let selection = editor.selectedRange()
             editor.string = text
             editor.setSelectedRange(NSRange(location: min(selection.location, (text as NSString).length), length: 0))
-            editor.undoManager?.removeAllActions()
+            if sharedUndoManager == nil { editor.undoManager?.removeAllActions() }
         }
+        context.coordinator.lastSynchronizedText = text
         applyStyle(editor)
     }
 
@@ -83,6 +101,8 @@ struct PromptEditor: NSViewRepresentable {
     @MainActor final class Coordinator: NSObject, NSTextViewDelegate {
         var parent: PromptEditor
         weak var editor: NSTextView?
+        var lastSynchronizedText = ""
+        private var openedTextGroup = false
         init(_ parent: PromptEditor) {
             self.parent = parent
             super.init()
@@ -94,13 +114,37 @@ struct PromptEditor: NSViewRepresentable {
         }
         deinit { NotificationCenter.default.removeObserver(self) }
         @objc private func undoOrRedo(_ notification: Notification) {
-            guard let editor, let manager = notification.object as? UndoManager,
+            guard let editor, editor.delegate === self, let manager = notification.object as? UndoManager,
                   manager === editor.undoManager else { return }
-            parent.text = editor.string
+            if parent.text != lastSynchronizedText {
+                // A template undo restores the model before AppKit posts this notification.
+                editor.breakUndoCoalescing()
+                editor.string = parent.text
+            } else {
+                parent.text = editor.string
+            }
+            lastSynchronizedText = parent.text
         }
         func textDidChange(_ notification: Notification) {
             guard let editor = notification.object as? NSTextView else { return }
             parent.text = editor.string
+            lastSynchronizedText = editor.string
+            if openedTextGroup {
+                openedTextGroup = false
+                parent.sharedUndoManager?.endUndoGrouping()
+            }
+        }
+        func textView(_ textView: NSTextView, shouldChangeTextIn affectedCharRange: NSRange, replacementString: String?) -> Bool {
+            if let manager = parent.sharedUndoManager, !manager.isUndoing, !manager.isRedoing, !openedTextGroup {
+                manager.beginUndoGrouping()
+                openedTextGroup = true
+            }
+            return true
         }
     }
+}
+
+private final class StudioTextView: NSTextView {
+    var sharedUndoManager: UndoManager?
+    override var undoManager: UndoManager? { sharedUndoManager ?? super.undoManager }
 }

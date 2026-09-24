@@ -74,6 +74,12 @@ public final class DraftController {
         if draft != nil { savedVersion = 0; state = .saved }
     }
 
+    /// Explicit content replacement (templates and undo) never triggers mode sample substitution.
+    public func replaceFields(_ replacement: DraftFields) {
+        sampleUntouched = false
+        change { $0 = replacement }
+    }
+
     public func change(_ mutation: (inout DraftFields) -> Void) {
         var updated = fields
         mutation(&updated)

@@ -20,6 +20,9 @@ cp "$repo_dir/.build/release/QwenAudioStudioMacApp" "$app_dir/Contents/MacOS/"
 cp "$repo_dir/Resources/Info.plist" "$app_dir/Contents/Info.plist"
 cp "$repo_dir/Resources/Fonts/QwenStudioSerif-Regular.ttf" "$app_dir/Contents/Resources/"
 cp "$repo_dir/Resources/Fonts/OFL.txt" "$app_dir/Contents/Resources/"
+# Preserve the SwiftPM resource bundle inside the signed app's standard resource directory.
+resource_bundle="QwenAudioStudioMac_StudioCore.bundle"
+cp -R "$repo_dir/.build/release/$resource_bundle" "$app_dir/Contents/Resources/"
 
 codesign --force --sign - "$app_dir"
 plutil -lint "$app_dir/Contents/Info.plist"

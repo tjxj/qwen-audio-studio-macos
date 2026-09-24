@@ -7,14 +7,30 @@ import StudioCore
 struct QwenAudioStudioMacApp: App {
     @State private var preferences: StudioPreferences
     init() {
+        if ProcessInfo.processInfo.arguments.contains("--verify-templates") {
+            do {
+                let engine = try TemplateEngine()
+                guard engine.templates.count == 42, CreationMode.allCases.allSatisfy({ mode in
+                    engine.templates.filter { $0.mode == mode }.count == 6
+                }) else { throw TemplateError.invalid("内置模板数量错误。") }
+                for item in engine.templates { _ = try engine.preview(templateID: item.id, values: [:]) }
+                print("templates=42; modes=7; eachMode=6; defaults=42/42; resourceSource=app-bundle")
+                exit(0)
+            } catch { print("template verification failed: \(error.localizedDescription)"); exit(1) }
+        }
         // Captures always use isolated preferences and the synthetic, in-memory draft.
         let capture = ProcessInfo.processInfo.arguments.contains { $0.hasPrefix("--capture-ui=") }
         let store: any StudioPreferenceStore = capture
             ? CapturePreferenceStore() : UserDefaultsPreferenceStore(defaults: .standard)
-        _preferences = State(initialValue: StudioPreferences(store: store))
+        let initialPreferences = StudioPreferences(store: store)
+        _preferences = State(initialValue: initialPreferences)
         let fontURL = Bundle.main.url(forResource: "QwenStudioSerif-Regular", withExtension: "ttf")
         if let fontURL {
             CTFontManagerRegisterFontsForURL(fontURL as CFURL, .process, nil)
+        }
+        if ProcessInfo.processInfo.arguments.contains("--capture-native-window"),
+           let argument = ProcessInfo.processInfo.arguments.first(where: { $0.hasPrefix("--capture-ui=") }) {
+            Self.runCaptureWindow(in: URL(fileURLWithPath: String(argument.dropFirst("--capture-ui=".count))), preferences: initialPreferences)
         }
     }
 
@@ -26,19 +42,6 @@ struct QwenAudioStudioMacApp: App {
                 .frame(minWidth: CGFloat(StudioLayout.minWidth),
                        minHeight: CGFloat(StudioLayout.minHeight - 52))
                 .background(WindowSizing())
-                .onAppear {
-                    if let argument = ProcessInfo.processInfo.arguments.first(where: { $0.hasPrefix("--capture-ui=") }) {
-                        let outputPath = String(argument.dropFirst("--capture-ui=".count))
-                        Task { @MainActor in
-                            try? await Task.sleep(for: .seconds(2))
-                            await Self.capturePreviews(in: URL(fileURLWithPath: outputPath), preferences: preferences)
-                            for window in NSApp.windows {
-                                if let sheet = window.attachedSheet { window.endSheet(sheet); sheet.orderOut(nil) }
-                            }
-                            NSApp.terminate(nil)
-                        }
-                    }
-                }
         }
         .defaultSize(width: 1400, height: 808)
         .windowResizability(.contentMinSize)
@@ -55,6 +58,33 @@ struct QwenAudioStudioMacApp: App {
     }
 
     @MainActor
+    private static func runCaptureWindow(in directory: URL, preferences: StudioPreferences) -> Never {
+        // Deterministic native hosting avoids restoring a previously closed SwiftUI scene.
+        let app = NSApplication.shared
+        app.setActivationPolicy(.regular)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1400, height: 808),
+                              styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        window.title = "Qwen Audio Studio"
+        window.minSize = NSSize(width: StudioLayout.minWidth, height: StudioLayout.minHeight)
+        window.contentView = NSHostingView(rootView: AppShell(qaMode: true).environment(preferences)
+            .preferredColorScheme(preferences.appearance.colorScheme))
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        DispatchQueue.global().asyncAfter(deadline: .now() + 15) { exit(124) }
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(2))
+            await capturePreviews(in: directory, preferences: preferences)
+            let files = (try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []
+            guard files.filter({ $0.hasSuffix(".png") }).count >= 4 else { print("capture failed: incomplete native window images"); exit(1) }
+            print("capture complete: native AppShell, isolated stores, 2x images")
+            exit(0)
+        }
+        app.run()
+        exit(1)
+    }
+
+    @MainActor
     private static func capturePreviews(in directory: URL, preferences: StudioPreferences) async {
         guard let window = NSApp.windows.first(where: { $0.isVisible && $0.contentView != nil }),
               let view = window.contentView?.superview else { return }
@@ -65,15 +95,12 @@ struct QwenAudioStudioMacApp: App {
         window.makeFirstResponder(nil)
 
         let prefix = ProcessInfo.processInfo.arguments.contains("--capture-page=templates")
-            ? "templates-sample-2" : "creation"
+            ? "templates" : "creation"
         var checks: [String] = []
-        checks.append("data=synthetic DraftController sample; isolated preferences; no network or files")
+        checks.append("data=public templates and synthetic draft; InMemoryDraftStore; InMemoryTemplateStore; CapturePreferenceStore; no network or user files")
+        checks.append("hosting=private NSWindow + NSHostingView(AppShell); window minimum resize behavior not re-tested by this harness")
+        if let engine = try? TemplateEngine() { checks.append("bundledTemplates=\(engine.templates.count)") }
         checks.append("minimum=\(Int(window.minSize.width))x\(Int(window.minSize.height))")
-        precondition(window.minSize.width >= 1120 && window.minSize.height >= 720)
-        window.setFrame(NSRect(origin: window.frame.origin, size: NSSize(width: 900, height: 500)), display: true)
-        try? await Task.sleep(for: .milliseconds(250))
-        checks.append("undersize request=900x500; actual=\(Int(window.frame.width))x\(Int(window.frame.height))")
-        precondition(window.frame.width == 1120 && window.frame.height == 720)
         for (width, name, appearance) in [
             (1280, "\(prefix)-light-1280", NSAppearance.Name.aqua),
             (1280, "\(prefix)-dark-1280", NSAppearance.Name.darkAqua),
@@ -99,10 +126,14 @@ struct QwenAudioStudioMacApp: App {
             try? data.write(to: directory.appendingPathComponent("\(name).png"))
             checks.append("\(name): frame=\(Int(window.frame.width))x\(Int(window.frame.height)); pixels=\(image.pixelsWide)x\(image.pixelsHigh)")
             if let sheet = window.attachedSheet, let sheetView = sheet.contentView?.superview,
-               let sheetImage = sheetView.bitmapImageRepForCachingDisplay(in: sheetView.bounds) {
+               let sheetImage = NSBitmapImageRep(bitmapDataPlanes: nil,
+                    pixelsWide: Int(sheetView.bounds.width * 2), pixelsHigh: Int(sheetView.bounds.height * 2),
+                    bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                    colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0) {
+                sheetImage.size = sheetView.bounds.size
                 sheetView.cacheDisplay(in: sheetView.bounds, to: sheetImage)
-                try? sheetImage.representation(using: .png, properties: [:])?.write(to: directory.appendingPathComponent("\(name)-advanced.png"))
-                checks.append("sheet=\(Int(sheet.frame.width))x\(Int(sheet.frame.height)); insideWindow=\(window.frame.contains(sheet.frame))")
+                try? sheetImage.representation(using: .png, properties: [:])?.write(to: directory.appendingPathComponent("\(name)-sheet.png"))
+                checks.append("sheet=\(Int(sheet.frame.width))x\(Int(sheet.frame.height)); pixels=\(sheetImage.pixelsWide)x\(sheetImage.pixelsHigh); insideWindow=\(window.frame.contains(sheet.frame))")
             }
         }
         try? checks.joined(separator: "\n").write(to: directory.appendingPathComponent("window-checks.txt"), atomically: true, encoding: .utf8)

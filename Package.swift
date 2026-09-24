@@ -9,7 +9,7 @@ let package = Package(
         .executable(name: "QwenAudioStudioMacApp", targets: ["QwenAudioStudioMacApp"]),
     ],
     targets: [
-        .target(name: "StudioCore"),
+        .target(name: "StudioCore", resources: [.process("Resources")]),
         .executableTarget(name: "QwenAudioStudioMacApp", dependencies: ["StudioCore"]),
         .testTarget(name: "StudioCoreTests", dependencies: ["StudioCore"]),
         .testTarget(name: "StudioAppTests", dependencies: ["QwenAudioStudioMacApp", "StudioCore"]),
