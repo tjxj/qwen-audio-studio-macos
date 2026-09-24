@@ -56,6 +56,9 @@ final class GenerationConfirmationController {
 /// Presented by the durable AppState wiring in Task 9. The current disabled
 /// CreationScreen button must stay disabled until that state exists.
 struct GenerationSheet: View {
+    static func referenceDisplaySlot(referenceID: String, fields: DraftFields) -> Int? {
+        fields.referenceBindings.first(where: { $0.referenceID == referenceID })?.slot
+    }
     let plan: GenerationPlan
     let directoryName: String
     let service: GenerationService
@@ -73,8 +76,8 @@ struct GenerationSheet: View {
             if !plan.submission.references.isEmpty {
                 VStack(alignment: .leading, spacing: 5) {
                     Text("本次上传的参考音频").font(.headline)
-                    ForEach(Array(plan.submission.references.enumerated()), id: \.element.id) { index, reference in
-                        Text("@voice\(index + 1) · \(reference.fileName) · \(reference.duration.formatted(.number.precision(.fractionLength(1)))) 秒")
+                    ForEach(plan.submission.references) { reference in
+                        Text("@voice\(Self.referenceDisplaySlot(referenceID: reference.id, fields: plan.submission.project.fields) ?? 0) · \(reference.fileName) · \(reference.duration.formatted(.number.precision(.fractionLength(1)))) 秒")
                     }
                 }
             }

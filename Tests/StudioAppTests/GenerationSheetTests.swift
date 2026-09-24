@@ -30,6 +30,13 @@ private actor RevocationRecorder {
 
 @MainActor @Suite(.serialized)
 struct GenerationSheetTests {
+    @Test func confirmationUsesStableVoiceSlotAfterGap() {
+        let fields = DraftFields(referenceBindings: [
+            ReferenceBinding(referenceID: "speaker-a", alias: "甲", slot: 1),
+            ReferenceBinding(referenceID: "speaker-c", alias: "丙", slot: 3)
+        ])
+        #expect(GenerationSheet.referenceDisplaySlot(referenceID: "speaker-c", fields: fields) == 3)
+    }
     private func authorization() -> GenerationAuthorization {
         let project = ProjectDraft(fields: DraftFields(prompt: "合成测试"))
         let directory = DirectorySnapshot(id: "synthetic-dir", version: 1, bookmark: Data([1]))
