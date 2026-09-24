@@ -72,9 +72,9 @@
 
 **Interfaces:** `actor StudioStore` with `createProject`, `saveProject(expectedRevision:changes:)`, `createBatch(clientRequestID:requestHash:)`, `claimJob`, `cancelQueued`, `listLibrary`; `InstanceOwnership.acquire(dataRoot:)`.
 
-- [ ] Write temporary-file tests for optimistic revision, atomic batch insertion, duplicate ID same/different body, one ownership lock across processes, restart interruption and queued-cancel race. Run red.
-- [ ] Implement versioned SQLite migrations, WAL, foreign keys and short transactions. Preserve immutable request snapshots and file journals. Do not open or mutate the web database here.
-- [ ] Run focused and full store tests, including crash/reopen. Commit.
+- [x] Write temporary-file tests for optimistic revision, atomic batch insertion, duplicate ID same/different body, one ownership lock across processes, restart interruption and queued-cancel race. Run red.
+- [x] Implement versioned SQLite migrations, WAL, foreign keys and short transactions. Preserve immutable request snapshots and file journals. Do not open or mutate the web database here.
+- [x] Run focused and full store tests, including crash/reopen. Commit.
 
 ### Task 5: Output folders, Finder and recoverable files
 
