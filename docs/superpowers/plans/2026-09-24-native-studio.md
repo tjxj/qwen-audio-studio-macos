@@ -52,9 +52,9 @@
 
 **Interfaces:** `DraftFields(name:mode:prompt:params:referenceBindings:outputDirectoryID:)`; `protocol DraftStore` with `create(_:) async throws -> ProjectDraft` and `save(_:expectedRevision:) async throws -> ProjectDraft`; `DraftController.change(_:) / saveNow()` with 800ms debounce and revision conflict. Task 2 uses an in-memory DraftStore; Task 4 adds the SQLite implementation.
 
-- [ ] Add tests for a hand-edited prompt surviving all seven mode changes, for a generated sample being replaced only while untouched, for Cmd-S waiting for an in-flight save, and for a 409 revision conflict keeping its local recovery text. See tests fail before implementation.
-- [ ] Build an AppKit NSTextView bridge for selection/undo and structured tag insertion. Add appearance and script font/size preferences, clear save states, keyboard focus and a stable first-window layout.
-- [ ] Run focused tests and resize the native window; no clipping at the accepted minimum. Commit.
+- [x] Add tests for a hand-edited prompt surviving all seven mode changes, for a generated sample being replaced only while untouched, for Cmd-S waiting for an in-flight save, and for a 409 revision conflict keeping its local recovery text. See tests fail before implementation.
+- [x] Build an AppKit NSTextView bridge for selection/undo and structured tag insertion. Add appearance and script font/size preferences, clear save states, keyboard focus and a stable first-window layout.
+- [x] Run focused tests and resize the native window; no clipping at the accepted minimum. Commit.
 
 ### Task 3: Prompt compiler and 42 templates
 
