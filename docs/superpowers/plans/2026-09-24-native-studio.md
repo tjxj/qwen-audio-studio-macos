@@ -102,9 +102,9 @@
 
 **Interfaces:** `ReferenceAudioService.importSource(url:)`, `prepare(importID:start:end:persistent:name:) -> PreparedReference`, `acquire(_:forJob:) / release(job:)`.
 
-- [ ] Add red tests for WAV/MP3/M4A/OGG Opus, a 40-second source trimmed to six seconds, 0/30-second boundaries, file/container mismatch, oversize, original-file preservation, silence/low-volume/clipping hints and two jobs holding the same temporary clip.
-- [ ] Use AVFoundation/Core Audio for supported containers, with an app-bundled native OGG/Opus decoder if the host lacks one. Convert selected range to mono PCM16 WAV, ≤10 MiB and ≤30 seconds. Show source and selection audio preview.
-- [ ] Persist only clips explicitly saved by the user; enforce one-batch ten-minute consent and reference leases. Run tests/real UI manual trim, then commit.
+- [x] Add red tests for WAV/MP3/M4A/OGG Opus, a 40-second source trimmed to six seconds, 0/30-second boundaries, file/container mismatch, oversize, original-file preservation, silence/low-volume/clipping hints and two jobs holding the same temporary clip.
+- [x] Use AVFoundation/Core Audio for supported containers, with an app-bundled native OGG/Opus decoder if the host lacks one. Convert selected range to mono PCM16 WAV, ≤10 MiB and ≤30 seconds. Show source and selection audio preview.
+- [x] Persist only clips explicitly saved by the user; enforce one-batch ten-minute consent and reference leases. Run tests/real UI manual trim, then commit.
 
 ### Task 8: Single-source player, waveform and A/B
 
