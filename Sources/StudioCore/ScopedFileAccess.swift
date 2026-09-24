@@ -53,6 +53,17 @@ final class ScopedFileAccess {
               directory || info.st_nlink == 1 else { throw OutputDirectoryError.invalidPath }
         return FileIdentity(device: info.st_dev, inode: info.st_ino)
     }
+    func size(_ path: String, expected: FileIdentity) throws -> Int64 {
+        let (parent, name) = try parent(path); defer { Darwin.close(parent) }
+        let file = openat(parent, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard file >= 0 else { throw OutputDirectoryError.invalidPath }
+        defer { Darwin.close(file) }
+        var info = stat()
+        guard fstat(file, &info) == 0, info.st_mode & S_IFMT == S_IFREG, info.st_nlink == 1,
+              FileIdentity(device: info.st_dev, inode: info.st_ino) == expected,
+              info.st_size >= 0 else { throw OutputDirectoryError.invalidPath }
+        return Int64(info.st_size)
+    }
     func read(_ path: String, expected: FileIdentity, maximumBytes: Int) throws -> Data {
         let (parent, name) = try parent(path); defer { Darwin.close(parent) }
         let file = openat(parent, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)

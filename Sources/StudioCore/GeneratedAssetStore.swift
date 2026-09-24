@@ -1,9 +1,29 @@
 import Foundation
 public enum AssetRemovalScope: String, Codable, Sendable { case recordOnly, generatedFiles }
+public struct RegisteredStorageUsage: Sendable {
+    public let bytes: Int64
+    public let unavailableCount: Int
+}
 public actor GeneratedAssetStore {
     private let store: StudioStore
     private let directories: OutputDirectoryStore
     public init(store: StudioStore, directories: OutputDirectoryStore) { self.store = store; self.directories = directories }
+
+    /// Counts only app-owned registered assets, including files in the app's
+    /// recycle area. Unregistered user files in the selected folder are ignored.
+    public func registeredStorageBytes() async throws -> RegisteredStorageUsage {
+        var bytes: Int64 = 0
+        var unavailable = 0
+        for asset in try await store.listRegisteredAssets() where asset.appOwned {
+            guard let identity = asset.fileIdentity else { unavailable += 1; continue }
+            do {
+                let lease = try await directories.resolve(asset.directoryID)
+                defer { lease.close() }
+                bytes += try lease.withAccess { try $0.size(asset.relativePath, expected: identity) }
+            } catch { unavailable += 1 }
+        }
+        return RegisteredStorageUsage(bytes: bytes, unavailableCount: unavailable)
+    }
 
     public func write(data: Data, fileName: String, kind: String, job: String, lease: DirectoryLease) async throws -> StoredAsset {
         guard try ScopedFileAccess.components(fileName).count == 1,

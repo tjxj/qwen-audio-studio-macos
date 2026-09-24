@@ -26,7 +26,7 @@ import StudioCore
                 let a = try AudioDecoder.decode(data: tone(seconds: 5, hertz: 440))
                 let b = try AudioDecoder.decode(data: tone(seconds: 8, hertz: 880))
                 let controller = ResultScreenController(candidates: [
-                    ResultCandidate(id: "synthetic-a", number: 1, state: .success, assetID: "synthetic-audio-a"),
+                    ResultCandidate(id: "synthetic-a", number: 1, state: .success, assetID: "synthetic-audio-a", isFinal: true),
                     ResultCandidate(id: "synthetic-b", number: 2, state: .success, assetID: "synthetic-audio-b"),
                     ResultCandidate(id: "synthetic-missing", number: 3, state: .success, assetID: "synthetic-missing"),
                 ], loader: { id in

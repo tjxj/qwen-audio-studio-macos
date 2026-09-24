@@ -2,6 +2,17 @@ import SwiftUI
 import StudioCore
 import AppKit
 
+@MainActor final class LibraryLiveRefresh {
+    func run(interval: Duration = .seconds(1), shouldRefresh: @escaping @MainActor () -> Bool,
+             refresh: @escaping @MainActor () async -> Void) async {
+        while !Task.isCancelled {
+            do { try await Task.sleep(for: interval) } catch { break }
+            guard !Task.isCancelled else { break }
+            if shouldRefresh() { await refresh() }
+        }
+    }
+}
+
 struct LibraryScreen: View {
     @Environment(\.colorScheme) private var colorScheme
     var state: AppState? = nil
@@ -27,6 +38,8 @@ struct LibraryScreen: View {
     @State private var audioReady = false
     @State private var audioChecking = false
     @State private var selectedAudioAsset: StoredAsset?
+    @State private var downloadRetryEligible = false
+    @State private var retryingDownload = false
 
     private var selected: StudioCore.LibraryItem? { jobs.first { $0.job.id == selectedJobID } }
     private var selectedProject: ProjectDraft? { projects.first { $0.id == selectedProjectID } }
@@ -74,7 +87,12 @@ struct LibraryScreen: View {
             if let feedback { Text(feedback).font(.caption).foregroundStyle(.secondary).lineLimit(2) }
         }
         .padding(20).background(StudioPalette.background).navigationTitle("作品库")
-        .task { await reload() }
+        .task {
+            await reload()
+            await LibraryLiveRefresh().run(shouldRefresh: {
+                tab == 0 && jobs.contains(where: { !$0.job.state.isTerminal })
+            }, refresh: { await reload() })
+        }
         .onChange(of: tab) { _, _ in Task { await reload() } }
         .onChange(of: search) { _, _ in Task { await reload() } }
         .onChange(of: mode) { _, _ in Task { await reload() } }
@@ -106,6 +124,7 @@ struct LibraryScreen: View {
                                         .font(.caption).foregroundStyle(.secondary)
                                 }
                                 Spacer()
+                                if item.isFinal { Label("最终", systemImage: "checkmark.seal.fill").font(.caption).foregroundStyle(accent) }
                             }.padding(11).frame(maxWidth: .infinity, alignment: .leading)
                                 .background(selectedJobID == item.job.id ? StudioPalette.green.opacity(0.13) : StudioPalette.background,
                                             in: RoundedRectangle(cornerRadius: 9))
@@ -142,6 +161,7 @@ struct LibraryScreen: View {
         VStack(alignment: .leading, spacing: 12) {
             if tab == 0, let item = selected {
                 Text(item.project.fields.name).font(StudioTypography.serif(22)).lineLimit(1)
+                if item.isFinal { Label("最终版本", systemImage: "checkmark.seal.fill").font(.caption).foregroundStyle(accent) }
                 HStack { Label(stage(item.job.state), systemImage: item.job.state == .success ? "checkmark.circle" : "clock")
                     Spacer(); Text("Seed \(item.job.seed)") }.font(.caption).foregroundStyle(.secondary)
                 TextField("版本名称", text: $name).textFieldStyle(.roundedBorder)
@@ -177,6 +197,11 @@ struct LibraryScreen: View {
                 HStack {
                     Button("导出报告") { Task { await exportReport(item) } }
                     if item.job.state == .queued { Button("取消排队") { Task { await cancel(item.job.id) } } }
+                    if downloadRetryEligible {
+                        Button(retryingDownload ? "下载中…" : "仅重试下载") { Task { await resumeDownload(item.job.id) } }
+                            .disabled(retryingDownload)
+                            .help("复用已记录的下载链接；不会重新发送收费模型请求")
+                    }
                     if item.job.state.isTerminal {
                         Menu("移入回收站") {
                             Button("仅移除记录") { Task { await trash(item.job.id, scope: .recordOnly) } }
@@ -282,7 +307,7 @@ struct LibraryScreen: View {
     }
     private func makeFinal(_ item: StudioCore.LibraryItem) async {
         guard let state else { return }
-        do { try await state.store.setFinalJob(batchID: item.job.batchID, jobID: item.job.id); feedback = "已设为最终版本。" }
+        do { try await state.store.setFinalJob(batchID: item.job.batchID, jobID: item.job.id); await reload(); feedback = "已设为最终版本。" }
         catch { feedback = "仅成功生成的同批次版本可设为最终版本。" }
     }
     private func archive(_ project: ProjectDraft, archived: Bool) async {
@@ -312,8 +337,10 @@ struct LibraryScreen: View {
         return asset
     }
     private func inspectSelectedAudio() async {
-        audioReady = false; selectedAudioAsset = nil
-        guard let state, let selected, selected.job.state == .success else { return }
+        audioReady = false; selectedAudioAsset = nil; downloadRetryEligible = false
+        guard let state, let selected else { return }
+        downloadRetryEligible = (try? await state.store.canRetryDownload(id: selected.job.id)) ?? false
+        guard selected.job.state == .success else { return }
         audioChecking = true; defer { audioChecking = false }
         do {
             let asset = try await audioAsset(selected.job.id)
@@ -328,15 +355,23 @@ struct LibraryScreen: View {
             }
         }
     }
+    private func resumeDownload(_ id: String) async {
+        guard let state, !retryingDownload else { return }
+        retryingDownload = true; defer { retryingDownload = false }
+        do { try await state.generation.resumeDownload(jobID: id); await reload() }
+        catch { feedback = "已记录的下载无法继续；请检查链接有效期与输出目录授权。不会重新提交模型请求。" }
+    }
     private func showResult(_ batchID: String) async {
         guard let state else { return }
         do {
             guard let batch = try await state.store.getBatch(id: batchID) else { throw StudioStoreError.missing }
+            let finalID = try await state.store.finalJobID(batchID: batchID)
             var candidates: [ResultCandidate] = []
             for id in batch.jobIDs {
                 guard let job = try await state.store.getJob(id: id) else { continue }
                 let assetID = try await state.store.listAssets(jobID: id).first(where: { $0.kind == "audio" })?.id
-                candidates.append(ResultCandidate(id: id, number: job.candidateIndex + 1, state: job.state, assetID: assetID))
+                candidates.append(ResultCandidate(id: id, number: job.candidateIndex + 1, state: job.state, assetID: assetID,
+                                                  isFinal: id == finalID))
             }
             result = ResultScreenController(candidates: candidates, assets: state.assets)
         } catch { feedback = "版本详情无法打开，请检查本地记录。" }

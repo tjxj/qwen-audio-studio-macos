@@ -4,6 +4,7 @@ import Foundation
 /// transactions never suspend for network, bookmarks, file moves, or decoding.
 public actor StudioStore {
     private let db: SQLiteConnection
+    private let dataRoot: URL
     private var ownership: InstanceOwnership?
     private var busyFileJobs: Set<String> = []
 
@@ -28,13 +29,35 @@ public actor StudioStore {
             withExtendedLifetime(ownership) {}
             throw error
         }
-        self.db = database; self.ownership = ownership
+        self.db = database; self.ownership = ownership; self.dataRoot = dataRoot
     }
     deinit { try? db.close() }
     /// Orderly shutdown: close SQLite before releasing the process lock.
     public func close() throws {
         guard busyFileJobs.isEmpty else { throw StudioStoreError.invalidTransition }
         try db.close(); ownership = nil
+    }
+    /// Counts application-owned metadata and reference clips only. User-selected
+    /// generated-output folders are deliberately outside this measurement.
+    public func localStorageBytes() throws -> Int64 {
+        let manager = FileManager.default
+        var total: Int64 = 0
+        let keys: Set<URLResourceKey> = [.isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey]
+        for name in ["studio.sqlite", "studio.sqlite-wal", "studio.sqlite-shm"] {
+            let file = dataRoot.appendingPathComponent(name)
+            guard manager.fileExists(atPath: file.path) else { continue }
+            let values = try file.resourceValues(forKeys: keys)
+            if values.isRegularFile == true && values.isSymbolicLink != true { total += Int64(values.fileSize ?? 0) }
+        }
+        let voices = dataRoot.appendingPathComponent("ReferenceAudio", isDirectory: true)
+        if let entries = manager.enumerator(at: voices, includingPropertiesForKeys: Array(keys), options: [.skipsPackageDescendants]) {
+            for case let file as URL in entries {
+                let values = try file.resourceValues(forKeys: keys)
+                if values.isSymbolicLink == true { entries.skipDescendants(); continue }
+                if values.isRegularFile == true { total += Int64(values.fileSize ?? 0) }
+            }
+        }
+        return total
     }
 
     public func createProject(id: String = "proj_" + UUID().uuidString, fields: DraftFields) throws -> ProjectDraft {
@@ -298,31 +321,31 @@ public actor StudioStore {
         var clauses = ["j.id NOT IN (SELECT job_id FROM removed_jobs)"]
         var parameters: [SQLiteValue] = []
         if let state = filter.state { clauses.append("j.state=?"); parameters.append(.text(state.rawValue)) }
-        if let mode = filter.mode { clauses.append("json_extract(CAST(p.fields AS TEXT),'$.mode')=?"); parameters.append(.text(mode.rawValue)) }
+        if let mode = filter.mode { clauses.append("json_extract(CAST(b.submission AS TEXT),'$.project.fields.mode')=?"); parameters.append(.text(mode.rawValue)) }
         if filter.favoriteOnly { clauses.append("COALESCE(m.favorite,0)=1") }
         if let since = filter.since { clauses.append("j.created_at_ms>=?"); parameters.append(.integer(Int(since.timeIntervalSince1970 * 1000))) }
         if !filter.search.isEmpty {
-            clauses.append("(p.id LIKE ? OR COALESCE(m.name,'') LIKE ? OR CAST(p.fields AS TEXT) LIKE ?)")
+            clauses.append("(json_extract(CAST(b.submission AS TEXT),'$.project.id') LIKE ? OR COALESCE(m.name,'') LIKE ? OR json_extract(CAST(b.submission AS TEXT),'$.project.fields.name') LIKE ? OR json_extract(CAST(b.submission AS TEXT),'$.project.fields.prompt') LIKE ?)")
             let search = "%\(filter.search)%"
-            parameters += [.text(search), .text(search), .text(search)]
+            parameters += [.text(search), .text(search), .text(search), .text(search)]
         }
         if let beforeID = filter.beforeID {
             guard let before = try db.rows("SELECT rowid FROM jobs WHERE id=?", [.text(beforeID)]).first?.first?.int else { return LibraryPage(items: [], nextBeforeID: nil) }
             clauses.append("j.rowid<?"); parameters.append(.integer(before))
         }
         parameters.append(.integer(limit + 1))
-        let sql = "SELECT j.\(Self.jobColumns.replacingOccurrences(of: ",", with: ",j.")),p.id,p.revision,p.fields,COALESCE(m.name,''),COALESCE(m.favorite,0),COALESCE(m.note,''),j.created_at_ms FROM jobs j JOIN batches b ON j.batch_id=b.id JOIN projects p ON b.project_id=p.id LEFT JOIN job_metadata m ON m.job_id=j.id WHERE \(clauses.joined(separator: " AND ")) ORDER BY j.rowid DESC LIMIT ?"
+        let sql = "SELECT j.\(Self.jobColumns.replacingOccurrences(of: ",", with: ",j.")),b.submission,COALESCE(m.name,''),COALESCE(m.favorite,0),COALESCE(m.note,''),j.created_at_ms,CASE WHEN f.job_id IS NULL THEN 0 ELSE 1 END FROM jobs j JOIN batches b ON j.batch_id=b.id LEFT JOIN job_metadata m ON m.job_id=j.id LEFT JOIN batch_final f ON f.batch_id=j.batch_id AND f.job_id=j.id WHERE \(clauses.joined(separator: " AND ")) ORDER BY j.rowid DESC LIMIT ?"
         let rows = try db.rows(sql, parameters)
         let visible = Array(rows.prefix(limit))
         let items = try visible.map { row -> LibraryItem in
             let storedJob = try job(Array(row[0..<7]))
-            guard let projectID = row[7].string, let revision = row[8].int,
-                  let name = row[10].string, let favorite = row[11].int, let note = row[12].string,
-                  let created = row[13].int else { throw StudioStoreError.corruptRecord }
-            let fields = try storeDecode(DraftFields.self, row[9])
-            return LibraryItem(job: storedJob, project: ProjectDraft(id: projectID, fields: fields, revision: revision),
+            guard let name = row[8].string, let favorite = row[9].int, let note = row[10].string,
+                  let created = row[11].int, let isFinal = row[12].int else { throw StudioStoreError.corruptRecord }
+            let submission = try storeDecode(BatchSubmission.self, row[7])
+            return LibraryItem(job: storedJob, project: submission.project,
                                metadata: JobMetadata(name: name, favorite: favorite != 0, note: note),
-                               createdAt: created == 0 ? .distantPast : Date(timeIntervalSince1970: Double(created) / 1000))
+                               createdAt: created == 0 ? .distantPast : Date(timeIntervalSince1970: Double(created) / 1000),
+                               isFinal: isFinal != 0)
         }
         return LibraryPage(items: items, nextBeforeID: rows.count > limit ? visible.last?[0].string : nil)
     }
@@ -378,6 +401,12 @@ public actor StudioStore {
               row[0] != .null else { return nil }
         return try storeDecode(ProviderResponseSnapshot.self, row[0])
     }
+    /// Read-only UI eligibility; never exposes a signed audio URL.
+    public func canRetryDownload(id: String) throws -> Bool {
+        guard let job = try getJob(id: id), [.failed, .interrupted].contains(job.state),
+              !job.resultUncertain, let receipt = try providerResponse(id: id) else { return false }
+        return receipt.expiresAt > Date()
+    }
     /// Explicit retry of a known GET, never of a paid POST. Exactly one caller wins.
     public func claimDownloadRetry(id: String) throws -> ProviderResponseSnapshot? {
         try db.transaction {
@@ -396,6 +425,9 @@ public actor StudioStore {
     }
     public func listAssets(directoryID: String) throws -> [StoredAsset] {
         try db.rows("SELECT metadata FROM assets WHERE directory_id=? ORDER BY rowid", [.text(directoryID)]).map { try storeDecode(StoredAsset.self, $0[0]) }
+    }
+    public func listRegisteredAssets() throws -> [StoredAsset] {
+        try db.rows("SELECT metadata FROM assets ORDER BY rowid").map { try storeDecode(StoredAsset.self, $0[0]) }
     }
     /// Covers journal inspection, filesystem movement and final metadata commit,
     /// including actor reentrancy while the caller awaits another service.

@@ -8,6 +8,7 @@ struct ResultCandidate: Identifiable, Sendable {
     let number: Int
     let state: JobState
     let assetID: String?
+    var isFinal = false
 }
 
 enum ResultValidationStatus: Equatable { case checking, ready, unavailable, noAudio }
@@ -137,6 +138,7 @@ struct ResultScreen: View {
     @State private var isSeeking = false
     @State private var loopStart = 0.0
     @State private var loopEnd = 0.5
+    private var accent: Color { colorScheme == .dark ? Color(red: 0.50, green: 0.79, blue: 0.69) : StudioPalette.green }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -148,7 +150,7 @@ struct ResultScreen: View {
                 }
                 Spacer()
                 Text("\(controller.rows.count) 个版本")
-                    .font(.system(size: 12, weight: .medium)).foregroundStyle(StudioPalette.green)
+                    .font(.system(size: 12, weight: .medium)).foregroundStyle(accent)
             }
             HStack(alignment: .top, spacing: 18) {
                 VStack(alignment: .leading, spacing: 9) {
@@ -165,6 +167,7 @@ struct ResultScreen: View {
                                             Text(status(row)).font(.caption).foregroundStyle(.secondary)
                                         }
                                         Spacer()
+                                        if row.candidate.isFinal { Text("最终").font(.caption.bold()).foregroundStyle(accent) }
                                         if controller.compareID == row.id { Text("B").font(.caption.bold()) }
                                     }
                                     .padding(10)
@@ -183,7 +186,10 @@ struct ResultScreen: View {
                     if let row = controller.selected {
                         HStack {
                             VStack(alignment: .leading, spacing: 4) {
-                                Text("版本 \(row.candidate.number)").font(StudioTypography.serif(23))
+                                HStack {
+                                    Text("版本 \(row.candidate.number)").font(StudioTypography.serif(23))
+                                    if row.candidate.isFinal { Label("最终版本", systemImage: "checkmark.seal.fill").font(.caption).foregroundStyle(accent) }
+                                }
                                 Text(status(row)).font(.caption).foregroundStyle(row.playable ? Color.secondary : Color.orange)
                             }
                             Spacer()
@@ -244,7 +250,7 @@ struct ResultScreen: View {
                             metric("内容校验", value: row.hash.map { String($0.prefix(12)).uppercased() } ?? "—")
                             Spacer()
                             Label("本机解码验收", systemImage: row.playable ? "checkmark.seal" : "exclamationmark.triangle")
-                                .foregroundStyle(row.playable ? StudioPalette.green : Color.orange)
+                                .foregroundStyle(row.playable ? accent : Color.orange)
                                 .font(.caption)
                         }
                     } else { ContentUnavailableView("暂无版本", systemImage: "waveform") }
@@ -278,7 +284,8 @@ struct ResultScreen: View {
     }
     private func metric(_ title: String, value: String) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(title).font(.caption).foregroundStyle(.secondary)
+            Text(title).font(.caption)
+                .foregroundStyle(colorScheme == .dark ? Color.white.opacity(0.72) : Color.secondary)
             Text(value).font(.system(size: 12, weight: .medium, design: .monospaced))
         }
     }

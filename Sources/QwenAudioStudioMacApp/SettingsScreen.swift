@@ -11,6 +11,9 @@ struct SettingsScreen: View {
     @State private var credentialStatus = "凭据尚未检查"
     @State private var environmentStatus = "尚未检查"
     @State private var localRecordCount = 0
+    @State private var localStorageBytes: Int64 = 0
+    @State private var generatedStorageBytes: Int64 = 0
+    @State private var unavailableGeneratedFiles = 0
     private let credentials = NativeCredentialStore()
 
     var body: some View {
@@ -77,8 +80,14 @@ struct SettingsScreen: View {
                         }
                         if let message = outputFolders.errorMessage { Text(message).foregroundStyle(.red).font(.caption) }
                         Divider()
-                        Text("本地库：\(state == nil ? "暂不可用" : "已连接") · \(localRecordCount) 条生成记录")
+                        Text("应用数据 \(ByteCountFormatter.string(fromByteCount: localStorageBytes, countStyle: .file))")
                             .font(.caption).foregroundStyle(.secondary)
+                        Text("已登记生成文件 \(ByteCountFormatter.string(fromByteCount: generatedStorageBytes, countStyle: .file)) · \(localRecordCount) 条记录")
+                            .font(.caption).foregroundStyle(.secondary)
+                        if unavailableGeneratedFiles > 0 {
+                            Text("\(unavailableGeneratedFiles) 个文件暂不可统计，请检查输出目录授权。")
+                                .font(.caption).foregroundStyle(.orange)
+                        }
                         Button("检查本地环境") { Task { await checkEnvironment() } }
                         Text(environmentStatus).font(.caption).foregroundStyle(.secondary).lineLimit(2)
                     }.card()
@@ -126,6 +135,7 @@ struct SettingsScreen: View {
         .frame(width: 780, height: 590)
         .background(StudioPalette.background)
         .onAppear { if qaMode { credentialStatus = "演示模式：未读取钥匙串" } else { refreshCredentialStatus() } }
+        .task { await checkEnvironment() }
         .onChange(of: preferences.defaultConcurrency) { _, value in
             if let state { Task { await state.generation.setMaxConcurrentJobs(value) } }
         }
@@ -143,6 +153,10 @@ struct SettingsScreen: View {
         guard let state else { environmentStatus = "本地库未连接，请关闭重复运行的应用后重试。"; return }
         do {
             localRecordCount = try await state.store.listLibrary().count
+            localStorageBytes = try await state.store.localStorageBytes()
+            let generated = try await state.assets.registeredStorageBytes()
+            generatedStorageBytes = generated.bytes
+            unavailableGeneratedFiles = generated.unavailableCount
             _ = try await state.store.listProjects()
             environmentStatus = "SQLite 与原生音频模块可用。"
         } catch { environmentStatus = "本地环境检查失败，请检查磁盘与权限。" }

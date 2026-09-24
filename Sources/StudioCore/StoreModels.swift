@@ -109,6 +109,7 @@ public struct LibraryItem: Sendable {
     public let project: ProjectDraft
     public let metadata: JobMetadata
     public let createdAt: Date
+    public let isFinal: Bool
 }
 
 public struct LibraryPage: Sendable {

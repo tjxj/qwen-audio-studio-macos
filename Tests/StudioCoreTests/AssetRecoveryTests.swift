@@ -24,6 +24,19 @@ final class PausedBookmarkResolution: DirectoryBookmarking, @unchecked Sendable 
 }
 
 struct AssetRecoveryTests {
+    @Test func storageUsageCountsOnlyRegisteredGeneratedAssetEvenAfterTrash() async throws {
+        let f = try OutputFixture()
+        let (job, id) = try await f.job()
+        let lease = try await f.directories.resolveForJob(job, directoryID: id)
+        let assets = GeneratedAssetStore(store: f.store, directories: f.directories)
+        _ = try await assets.write(data: Data(repeating: 1, count: 4096), fileName: "audio.wav", kind: "audio", job: job, lease: lease)
+        try Data(repeating: 2, count: 8192).write(to: f.output.appendingPathComponent(lease.relativeDirectory!).appendingPathComponent("user-file.bin"))
+        #expect(try await assets.registeredStorageBytes().bytes == 4096)
+        _ = try await f.store.cancelQueued(id: job)
+        try await assets.trash(job: job, scope: .generatedFiles)
+        #expect(try await assets.registeredStorageBytes().bytes == 4096)
+        lease.close(); try await f.cleanup()
+    }
     @Test func playbackReadRequiresRegisteredIdentityAndRejectsReplacement() async throws {
         let f = try OutputFixture()
         let (job, id) = try await f.job()

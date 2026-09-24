@@ -171,7 +171,10 @@ struct QwenAudioStudioMacApp: App {
                 _ = try await state.assets.write(data: syntheticTone(), fileName: "audio.wav", kind: "audio", job: id, lease: lease)
                 lease.close()
             } else if index == 3 { _ = try await state.store.cancelQueued(id: id) }
-            if index == 0 { try await state.store.updateJobMetadata(id: id, name: "晚安版", favorite: true, note: "合成验收示例") }
+            if index == 0 {
+                try await state.store.updateJobMetadata(id: id, name: "晚安版", favorite: true, note: "合成验收示例")
+                try await state.store.setFinalJob(batchID: batch.id, jobID: id)
+            }
         }
         await state.templates.reload()
     }

@@ -22,12 +22,14 @@ final class AppState {
     var activeRequestID: String?
     var jobStage: [String: JobState] = [:]
 
-    init(dataRoot: URL, synthesizer: any SynthesizerClient = NextClient()) throws {
+    init(dataRoot: URL, synthesizer: any SynthesizerClient = NextClient(),
+         batchCommitterFactory: ((StudioStore) -> any BatchCommitting)? = nil) throws {
         store = try StudioStore(dataRoot: dataRoot)
         directories = OutputDirectoryStore(store: store)
         assets = GeneratedAssetStore(store: store, directories: directories)
         references = try ReferenceAudioService(root: dataRoot.appendingPathComponent("ReferenceAudio"), store: store)
         generation = GenerationService(store: store, directories: directories, assets: assets, synthesizer: synthesizer,
+                                       batchCommitter: batchCommitterFactory?(store),
                                        maxConcurrentJobs: StudioPreferences().defaultConcurrency)
         outputFolders = OutputFolderController(directories: directories, referenceAudio: references)
         templates = TemplateLibraryController(store: SQLiteTemplateStore(store: store))
@@ -59,6 +61,12 @@ final class AppState {
             draft.load(project)
             try await store.setCurrentProject(id: project.id)
         } catch { errorMessage = "当前草稿尚未保存，无法切换项目。" }
+    }
+    func openProjectID(_ id: String) async {
+        do {
+            guard let current = try await store.getProject(id: id) else { throw StudioStoreError.missing }
+            await openProject(current)
+        } catch { errorMessage = "项目已不可用，请刷新作品库。" }
     }
 
     func newBlankDraft() async {
@@ -108,6 +116,8 @@ final class AppState {
         guard !submitting, generationPlan?.confirmationHash == plan.confirmationHash else { return }
         generationPlan = nil
         submitting = true
+        activeBatchID = nil
+        jobStage = [:]
         activeRequestID = requestID
         Task { await monitorRequest(requestID) }
         Task {

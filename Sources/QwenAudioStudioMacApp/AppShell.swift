@@ -115,7 +115,7 @@ struct AppShell: View {
                 switch selection ?? .creation {
                 case .creation: CreationScreen(draft: draft, sharedUndoManager: templateApplication.undoManager, editor: promptEditor, appState: appState)
                 case .library: LibraryScreen(state: appState) { project in
-                    Task { await appState?.openProject(project); selection = .creation }
+                    Task { await appState?.openProjectID(project.id); selection = .creation }
                 }
                 case .templates: TemplateScreen(library: templateLibrary, application: templateApplication) { selection = .creation }
                 }
