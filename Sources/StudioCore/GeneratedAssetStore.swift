@@ -135,4 +135,23 @@ public actor GeneratedAssetStore {
             return (lease, lease.rootURL.appendingPathComponent(asset.relativePath))
         } catch { lease.close(); throw error }
     }
+    public func readRegisteredAudio(_ id: String) async throws -> Data {
+        guard let asset = try await store.getAsset(id: id), asset.kind == "audio",
+              let identity = asset.fileIdentity else { throw OutputDirectoryError.unregistered }
+        let lease = try await directories.resolve(asset.directoryID)
+        defer { lease.close() }
+        return try lease.withAccess { try $0.read(asset.relativePath, expected: identity, maximumBytes: 256 * 1024 * 1024) }
+    }
+    public func decodeRegisteredAudio(_ id: String) async throws -> DecodedAudio {
+        guard let asset = try await store.getAsset(id: id), asset.kind == "audio" else { throw OutputDirectoryError.unregistered }
+        let bytes = try await readRegisteredAudio(id)
+        if URL(fileURLWithPath: asset.relativePath).pathExtension.lowercased() == "pcm" {
+            guard let job = try await store.getJob(id: asset.jobID),
+                  let batch = try await store.getBatch(id: job.batchID),
+                  batch.submission.project.fields.params.format == "pcm" else { throw AudioDecodeError.invalidAudio }
+            let params = batch.submission.project.fields.params
+            return try AudioDecoder.decode(data: bytes, rawPCMFormat: RawPCMFormat(sampleRate: params.sampleRate, channels: params.channels))
+        }
+        return try AudioDecoder.decode(data: bytes)
+    }
 }

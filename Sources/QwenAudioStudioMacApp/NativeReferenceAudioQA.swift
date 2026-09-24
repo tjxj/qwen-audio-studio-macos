@@ -49,7 +49,35 @@ import StudioCore
                 guard ReferencePlayback.shared.state == .selection else { exit(1) }
                 ReferencePlayback.shared.stop()
                 guard ReferencePlayback.shared.state == .stopped, controller.selectionValid else { exit(1) }
-                checks.append("preview=source -> selection -> stopped; volume=0; one AVAudioPlayer")
+                checks.append("preview=source -> selection -> stopped; volume=0; shared one AVAudioPlayer")
+                print("QA stage: previews passed"); fflush(stdout)
+                let a = DecodedAudio(samples: (0..<(5 * 24000)).map { Float(0.3 * sin(2 * .pi * 440 * Double($0) / 24000)) },
+                                     sampleRate: 24000, contentHash: "synthetic-440")
+                let b = DecodedAudio(samples: (0..<(8 * 24000)).map { Float(0.3 * sin(2 * .pi * 880 * Double($0) / 24000)) },
+                                     sampleRate: 24000, contentHash: "synthetic-880")
+                let playback = AudioPlaybackController.shared
+                playback.configure(loader: { id in id == "synthetic-a" ? a : b })
+                playback.volume = 0
+                try await playback.play(assetID: "synthetic-a")
+                print("QA stage: result A playing"); fflush(stdout)
+                try playback.seek(seconds: 1.25)
+                let switchStart = playback.position
+                try await playback.compare(assetA: "synthetic-a", assetB: "synthetic-b")
+                print("QA stage: comparison loaded at \(playback.position)"); fflush(stdout)
+                try playback.switchToB()
+                print("QA stage: switched B at \(playback.position)"); fflush(stdout)
+                guard abs(playback.position - switchStart) <= 0.15, playback.activeAssetID == "synthetic-b",
+                      ReferencePlayback.shared.state == .stopped else { exit(1) }
+                try playback.switchToA()
+                print("QA stage: switched A at \(playback.position)"); fflush(stdout)
+                guard abs(playback.position - switchStart) <= 0.15 else { exit(1) }
+                try playback.setLoop(start: 1, end: 1.5)
+                try playback.seek(seconds: 1.45)
+                try await Task.sleep(for: .milliseconds(250))
+                print("QA stage: loop at \(playback.position)"); fflush(stdout)
+                guard (1..<1.5).contains(playback.position) else { exit(1) }
+                playback.stop()
+                checks.append("playback=source -> selection -> stopped -> 5s/8s A/B; samePosition<=150ms; loop=1.0...1.5s; outputVolume=0")
                 let prepared = await controller.prepare()
                 guard prepared?.snapshot.duration == 6, prepared?.snapshot.temporary == true,
                       try Data(contentsOf: long) == original, try await service.library().isEmpty else { exit(1) }

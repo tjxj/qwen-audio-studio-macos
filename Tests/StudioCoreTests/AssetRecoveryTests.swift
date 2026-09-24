@@ -24,6 +24,20 @@ final class PausedBookmarkResolution: DirectoryBookmarking, @unchecked Sendable 
 }
 
 struct AssetRecoveryTests {
+    @Test func playbackReadRequiresRegisteredIdentityAndRejectsReplacement() async throws {
+        let f = try OutputFixture()
+        let (job, id) = try await f.job()
+        let lease = try await f.directories.resolveForJob(job, directoryID: id)
+        let assets = GeneratedAssetStore(store: f.store, directories: f.directories)
+        let original = Data("registered audio bytes".utf8)
+        let audio = try await assets.write(data: original, fileName: "audio.wav", kind: "audio", job: job, lease: lease)
+        #expect(try await assets.readRegisteredAudio(audio.id) == original)
+        let path = f.output.appendingPathComponent(audio.relativePath)
+        try FileManager.default.removeItem(at: path)
+        try Data("replacement".utf8).write(to: path)
+        await #expect(throws: OutputDirectoryError.invalidPath) { try await assets.readRegisteredAudio(audio.id) }
+        lease.close(); try await f.cleanup()
+    }
     @Test func storeCannotCloseWhileFileJobOwnsPendingJournal() async throws {
         let f = try OutputFixture()
         let (job, id) = try await f.job()

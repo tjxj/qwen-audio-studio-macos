@@ -8,6 +8,9 @@ struct QwenAudioStudioMacApp: App {
     @State private var preferences: StudioPreferences
     @State private var outputFolders: OutputFolderController
     init() {
+        if let argument = ProcessInfo.processInfo.arguments.first(where: { $0.hasPrefix("--verify-result-root=") }) {
+            NativeResultQA.run(root: URL(fileURLWithPath: String(argument.dropFirst("--verify-result-root=".count)), isDirectory: true))
+        }
         if let argument = ProcessInfo.processInfo.arguments.first(where: { $0.hasPrefix("--verify-reference-memory-root=") }) {
             NativeReferenceMemoryQA.run(root: URL(fileURLWithPath: String(argument.dropFirst("--verify-reference-memory-root=".count)), isDirectory: true))
         }
@@ -52,6 +55,7 @@ struct QwenAudioStudioMacApp: App {
                 .environment(preferences)
                 .environment(outputFolders)
                 .task {
+                    AudioPlaybackController.shared.startMonitoringRoute()
                     await outputFolders.loadDefault()
                     while !Task.isCancelled {
                         _ = try? await outputFolders.referenceAudio?.cleanup()

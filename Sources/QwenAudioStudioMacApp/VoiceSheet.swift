@@ -4,29 +4,26 @@ import AVFoundation
 import UniformTypeIdentifiers
 import StudioCore
 
-/// A shared preview transport: starting a source/selection stops the previous preview.
+/// Reference controls share the single result player and never own a second output.
 @MainActor @Observable final class ReferencePlayback {
     static let shared = ReferencePlayback()
     enum State: Equatable { case stopped, source, selection, library }
-    private(set) var state: State = .stopped
-    private var player: AVAudioPlayer?
-    var volume: Float = 0.8 { didSet { player?.volume = volume } }
-    private var completion: Task<Void, Never>?
-    func play(_ data: Data, state: State) throws {
-        stop()
-        let player = try AVAudioPlayer(data: data)
-        player.volume = volume
-        guard player.prepareToPlay(), player.play() else { throw ReferenceAudioError.decodeFailed }
-        self.player = player; self.state = state
-        completion = Task { [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .milliseconds(100))
-                guard let self else { return }
-                if self.player?.isPlaying != true { self.stop(); return }
-            }
-        }
+    private let transport: AudioPlaybackController
+    init(transport: AudioPlaybackController = .shared) { self.transport = transport }
+    private var previewKind: State = .stopped
+    var state: State { transport.isPreview && transport.state == .playing ? previewKind : .stopped }
+    var volume: Float {
+        get { transport.volume }
+        set { transport.volume = newValue }
     }
-    func stop() { completion?.cancel(); completion = nil; player?.stop(); player = nil; state = .stopped }
+    func play(_ data: Data, state: State) throws {
+        try transport.playPreview(data: data)
+        previewKind = state
+    }
+    func stop() {
+        if transport.isPreview { transport.stop() }
+        previewKind = .stopped
+    }
 }
 
 @MainActor @Observable final class VoiceSheetController {

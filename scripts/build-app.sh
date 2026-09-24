@@ -36,4 +36,8 @@ if [[ "$dist_app" == "$repo_dir/dist/Qwen Audio Studio.app" && -d "$dist_app" ]]
   /bin/rm -R "$dist_app"
 fi
 /usr/bin/ditto --norsrc --noextattr "$app_dir" "$dist_app"
+# iCloud may attach FinderInfo to the copied bundle even when ditto excludes
+# source extended attributes. Remove only that Finder metadata from our build.
+/usr/bin/xattr -dr com.apple.FinderInfo "$dist_app" 2>/dev/null || true
+codesign --verify --deep --strict "$dist_app"
 print "Built: $dist_app"

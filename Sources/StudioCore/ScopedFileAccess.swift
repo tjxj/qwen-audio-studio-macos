@@ -53,6 +53,31 @@ final class ScopedFileAccess {
               directory || info.st_nlink == 1 else { throw OutputDirectoryError.invalidPath }
         return FileIdentity(device: info.st_dev, inode: info.st_ino)
     }
+    func read(_ path: String, expected: FileIdentity, maximumBytes: Int) throws -> Data {
+        let (parent, name) = try parent(path); defer { Darwin.close(parent) }
+        let file = openat(parent, name, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard file >= 0 else { throw OutputDirectoryError.invalidPath }
+        defer { Darwin.close(file) }
+        var info = stat()
+        guard fstat(file, &info) == 0, info.st_mode & S_IFMT == S_IFREG, info.st_nlink == 1,
+              FileIdentity(device: info.st_dev, inode: info.st_ino) == expected,
+              info.st_size > 0, info.st_size <= maximumBytes else { throw OutputDirectoryError.invalidPath }
+        var data = Data(count: Int(info.st_size))
+        try data.withUnsafeMutableBytes { bytes in
+            var offset = 0
+            while offset < bytes.count {
+                let count = Darwin.read(file, bytes.baseAddress!.advanced(by: offset), bytes.count - offset)
+                if count < 0 && errno == EINTR { continue }
+                guard count > 0 else { throw OutputDirectoryError.invalidPath }
+                offset += count
+            }
+        }
+        var after = stat()
+        guard fstat(file, &after) == 0, FileIdentity(device: after.st_dev, inode: after.st_ino) == expected,
+              after.st_size == info.st_size, after.st_mtimespec.tv_sec == info.st_mtimespec.tv_sec,
+              after.st_mtimespec.tv_nsec == info.st_mtimespec.tv_nsec else { throw OutputDirectoryError.invalidPath }
+        return data
+    }
     func exists(_ path: String) throws -> Bool {
         let (parent, name) = try parent(path); defer { Darwin.close(parent) }
         var info = stat()

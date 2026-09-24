@@ -1,0 +1,4 @@
+data=synthetic 440Hz 5s and 880Hz 8s; network=none; credentials=none
+versions=3; playable=2; missing=1; actualPCMDecode=true
+light: pixels=2560x1440; scale=2
+dark: pixels=2560x1440; scale=2
