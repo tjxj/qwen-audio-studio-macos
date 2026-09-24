@@ -92,9 +92,9 @@
 
 **Interfaces:** `protocol SynthesizerClient { func synthesize(_ request: CompiledRequest) async throws -> ProviderOutput }`; `GenerationService.preflight(_:) / submit(_:confirmedHash:clientRequestID:)`.
 
-- [ ] Add red tests with URLProtocol/fake synthesizer: exact Beijing endpoint and model, no plaintext credential in response/log, compiler+params preflight stopping paid calls, two different seeds causing exactly two calls, duplicate nonce not causing extra calls, uncertain outcome never auto-resubmitting, and a queued-only cancel.
-- [ ] Store API Key and Workspace ID in dedicated native Keychain items. Build URLSession request/download, validate server response, show compiled prompt/call count/reference names in an explicit charge confirmation sheet. Keep cloud/network work off the UI actor.
-- [ ] Run green and commit. Real API calls remain separate from automatic tests.
+- [x] Add red tests with URLProtocol/fake synthesizer: exact Beijing endpoint and model, no plaintext credential in response/log, compiler+params preflight stopping paid calls, two different seeds causing exactly two calls, duplicate nonce not causing extra calls, uncertain outcome never auto-resubmitting, and a queued-only cancel.
+- [x] Store API Key and Workspace ID in dedicated native Keychain items. Build URLSession request/download, validate server response, show compiled prompt/call count/reference names in an explicit charge confirmation sheet. Keep cloud/network work off the UI actor.
+- [x] Run green and commit. Real API calls remain separate from automatic tests.
 
 ### Task 7: Voice import, trim, codec coverage and leases
 
