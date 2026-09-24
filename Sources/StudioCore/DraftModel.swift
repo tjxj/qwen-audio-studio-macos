@@ -19,10 +19,10 @@ public struct DraftFields: Codable, Equatable, Sendable {
 }
 
 public struct ProjectDraft: Codable, Equatable, Identifiable, Sendable {
-    public let id: UUID
+    public let id: String
     public var fields: DraftFields
     public var revision: Int
-    public init(id: UUID = UUID(), fields: DraftFields, revision: Int = 1) {
+    public init(id: String = "proj_" + UUID().uuidString, fields: DraftFields, revision: Int = 1) {
         self.id = id; self.fields = fields; self.revision = revision
     }
 }
@@ -34,7 +34,7 @@ public protocol DraftStore: Sendable {
 }
 
 public actor InMemoryDraftStore: DraftStore {
-    private var drafts: [UUID: ProjectDraft] = [:]
+    private var drafts: [String: ProjectDraft] = [:]
     public init() {}
     public func create(_ fields: DraftFields) async throws -> ProjectDraft {
         let draft = ProjectDraft(fields: fields)

@@ -11,7 +11,7 @@ let package = Package(
     targets: [
         .target(name: "StudioCore", resources: [.process("Resources")]),
         .executableTarget(name: "QwenAudioStudioMacApp", dependencies: ["StudioCore"]),
-        .testTarget(name: "StudioCoreTests", dependencies: ["StudioCore"]),
+        .testTarget(name: "StudioCoreTests", dependencies: ["StudioCore"], exclude: ["Fixtures"]),
         .testTarget(name: "StudioAppTests", dependencies: ["QwenAudioStudioMacApp", "StudioCore"]),
     ]
 )
