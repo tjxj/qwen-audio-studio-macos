@@ -1,25 +1,15 @@
 import SwiftUI
 import StudioCore
 
-private struct PreviewTemplate: Identifiable {
-    let id: Int
-    let title: String
-    let subtitle: String
-    let mode: CreationMode
-    let suggestedDuration: String
-}
-
 struct TemplateScreen: View {
-    @State private var selectedCategory = "全部"
-    @State private var selectedID = 1
-    @State private var search = ""
+    @State private var selectedID = ProcessInfo.processInfo.arguments.contains("--capture-template=2") ? 2 : 1
 
     private let categories = ["全部", "播客", "广告", "有声书", "广播剧", "游戏配音", "旁白", "自定义"]
-    private let previews = [
-        PreviewTemplate(id: 1, title: "雨夜陪伴", subtitle: "把忙碌的一天，轻轻放在雨声里。", mode: .podcast, suggestedDuration: "建议 45 秒"),
-        PreviewTemplate(id: 2, title: "双人科技访谈", subtitle: "从一个具体问题展开轻巧、有来回的谈话。", mode: .podcast, suggestedDuration: "建议 50 秒"),
-        PreviewTemplate(id: 3, title: "知识问答", subtitle: "用生活中的小疑问打开知识话题。", mode: .podcast, suggestedDuration: "建议 40 秒"),
-    ]
+    private let previews = ShellPreviewTemplate.samples
+
+    private var selectedPreview: ShellPreviewTemplate {
+        ShellPreviewTemplate.sample(id: selectedID) ?? previews[0]
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -40,21 +30,26 @@ struct TemplateScreen: View {
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 6) {
                     ForEach(categories, id: \.self) { category in
-                        Button(category) { selectedCategory = category }
+                        Text(category)
                             .font(.system(size: 12, weight: .semibold))
-                            .buttonStyle(.plain)
                             .padding(.horizontal, 12)
                             .padding(.vertical, 8)
-                            .background(selectedCategory == category ? StudioPalette.greenSoft : .clear,
+                            .background(category == "全部" ? StudioPalette.greenSoft : .clear,
                                         in: RoundedRectangle(cornerRadius: 8))
-                            .foregroundStyle(selectedCategory == category ? StudioPalette.green : .primary)
+                            .foregroundStyle(category == "全部" ? StudioPalette.green : .primary)
                     }
                 }
             }
 
             HStack(spacing: 10) {
-                TextField("搜索场景、标题或标签", text: $search)
-                    .textFieldStyle(.roundedBorder)
+                Label("搜索场景、标题或标签 · 后续接入", systemImage: "magnifyingglass")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 10)
+                    .frame(height: 27)
+                    .background(StudioPalette.surface, in: RoundedRectangle(cornerRadius: 6))
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(StudioPalette.stroke))
                     .frame(maxWidth: 440)
                 Text("展示样例 · 3 个场景")
                     .font(.system(size: 11))
@@ -82,7 +77,7 @@ struct TemplateScreen: View {
         .navigationTitle("灵感模板")
     }
 
-    private func card(_ item: PreviewTemplate) -> some View {
+    private func card(_ item: ShellPreviewTemplate) -> some View {
         Button {
             selectedID = item.id
         } label: {
@@ -122,13 +117,13 @@ struct TemplateScreen: View {
             Text("脚本预览 · 样例")
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(.secondary)
-            Text(previews.first(where: { $0.id == selectedID })?.title ?? "雨夜陪伴")
+            Text(selectedPreview.title)
                 .font(StudioTypography.serif(25))
-            Text("在雨声中，把一段小小的故事说给你听。")
+            Text(selectedPreview.subtitle)
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
             Divider()
-            Text("【场景】窗外的雨渐渐落下。\n\n【角色：讲述者】温和、自然。\n\n【对白：讲述者】把忙碌的一天，轻轻放在雨声里。")
+            Text(selectedPreview.script)
                 .font(StudioTypography.serif(15))
                 .lineSpacing(6)
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)

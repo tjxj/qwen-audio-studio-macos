@@ -31,7 +31,7 @@ private enum StudioPage: String, CaseIterable, Identifiable {
 }
 
 struct AppShell: View {
-    @State private var selection: StudioPage? = .creation
+    @State private var selection: StudioPage? = ProcessInfo.processInfo.arguments.contains("--capture-page=templates") ? .templates : .creation
     @Environment(\.openSettings) private var openSettings
     @Environment(\.colorScheme) private var colorScheme
 

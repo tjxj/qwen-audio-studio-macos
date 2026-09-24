@@ -49,9 +49,11 @@ struct QwenAudioStudioMacApp: App {
         window.makeKeyAndOrderFront(nil)
         window.makeFirstResponder(nil)
 
+        let prefix = ProcessInfo.processInfo.arguments.contains("--capture-page=templates")
+            ? "templates-sample-2" : "creation"
         for (name, appearance) in [
-            ("creation-light-1280", NSAppearance.Name.aqua),
-            ("creation-dark-1280", NSAppearance.Name.darkAqua),
+            ("\(prefix)-light-1280", NSAppearance.Name.aqua),
+            ("\(prefix)-dark-1280", NSAppearance.Name.darkAqua),
         ] {
             window.appearance = NSAppearance(named: appearance)
             window.displayIfNeeded()

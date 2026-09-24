@@ -2,13 +2,9 @@ import SwiftUI
 import StudioCore
 
 struct CreationScreen: View {
-    @State private var name = "雨夜里的慢生活"
-    @State private var mode: CreationMode = .podcast
-    @State private var script = "【场景】雨夜，窗边的一盏灯。\n\n【角色：讲述者】温和沉静，自然舒缓。\n\n【音效】细雨落在窗沿，轻柔、不盖过人声。\n\n【对白：讲述者】今晚，不必急着给生活一个答案。把未完成的事留给明天，先照顾好此刻的自己。\n\n【音乐】极轻的钢琴，在尾音后慢慢淡出。"
-    @State private var voiceDescription = ""
-    @State private var format = "WAV"
-    @State private var sampleRate = "48 kHz"
-    @State private var candidates = 1
+    private let name = "雨夜里的慢生活"
+    private let mode: CreationMode = .podcast
+    private let script = "【场景】雨夜，窗边的一盏灯。\n\n【角色：讲述者】温和沉静，自然舒缓。\n\n【音效】细雨落在窗沿，轻柔、不盖过人声。\n\n【对白：讲述者】今晚，不必急着给生活一个答案。把未完成的事留给明天，先照顾好此刻的自己。\n\n【音乐】极轻的钢琴，在尾音后慢慢淡出。"
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -32,11 +28,10 @@ struct CreationScreen: View {
 
     private var header: some View {
         HStack(alignment: .center, spacing: 12) {
-            TextField("作品名称", text: $name)
+            Text(name)
                 .font(StudioTypography.serif(30))
-                .textFieldStyle(.plain)
                 .accessibilityLabel("作品名称，界面样例")
-                .frame(maxWidth: 460)
+                .frame(maxWidth: 460, alignment: .leading)
 
             Label("界面样例", systemImage: "eye")
                 .font(.system(size: 11, weight: .medium))
@@ -47,16 +42,10 @@ struct CreationScreen: View {
 
             Spacer()
 
-            Menu {
-                Button("空白草稿") {}
-                    .disabled(true)
-            } label: {
-                Image(systemName: "ellipsis")
-                    .font(.system(size: 16, weight: .semibold))
-                    .foregroundStyle(.secondary)
-                    .frame(width: 28, height: 28)
-            }
-            .menuStyle(.borderlessButton)
+            Image(systemName: "ellipsis")
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(.secondary)
+                .frame(width: 28, height: 28)
             .help("草稿功能将在后续版本接入")
         }
         .frame(height: 42)
@@ -65,20 +54,15 @@ struct CreationScreen: View {
     private var modes: some View {
         HStack(spacing: 8) {
             ForEach(CreationMode.allCases) { item in
-                Button {
-                    mode = item
-                } label: {
-                    Label(item.title, systemImage: item.symbol)
-                        .font(.system(size: 12, weight: .semibold))
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 38)
-                        .foregroundStyle(mode == item ? Color.white : Color.primary)
-                        .background(mode == item ? StudioPalette.green : StudioPalette.surface,
-                                    in: RoundedRectangle(cornerRadius: 9))
-                        .overlay(RoundedRectangle(cornerRadius: 9)
-                            .stroke(mode == item ? StudioPalette.green : StudioPalette.stroke))
-                }
-                .buttonStyle(.plain)
+                Label(item.title, systemImage: item.symbol)
+                    .font(.system(size: 12, weight: .semibold))
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 38)
+                    .foregroundStyle(mode == item ? Color.white : Color.primary)
+                    .background(mode == item ? StudioPalette.green : StudioPalette.surface,
+                                in: RoundedRectangle(cornerRadius: 9))
+                    .overlay(RoundedRectangle(cornerRadius: 9)
+                        .stroke(mode == item ? StudioPalette.green : StudioPalette.stroke))
                 .accessibilityAddTraits(mode == item ? [.isSelected] : [])
             }
         }
@@ -121,18 +105,20 @@ struct CreationScreen: View {
                 }
             }
 
-            TextEditor(text: $script)
-                .font(StudioTypography.serif(17))
-                .lineSpacing(8)
-                .scrollContentBackground(.hidden)
-                .padding(12)
+            ScrollView {
+                Text(script)
+                    .font(StudioTypography.serif(17))
+                    .lineSpacing(8)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+                    .padding(16)
+            }
                 .background(StudioPalette.background,
                             in: RoundedRectangle(cornerRadius: 9))
                 .overlay(RoundedRectangle(cornerRadius: 9).stroke(StudioPalette.stroke))
-                .accessibilityLabel("创作脚本，界面样例")
+                .accessibilityLabel("创作脚本只读预览")
 
             HStack {
-                Text("脚本仅供界面预览，尚未保存")
+                Text("脚本只读预览 · 编辑与自动保存后续接入")
                     .font(.system(size: 11))
                     .foregroundStyle(.secondary)
                 Spacer()
@@ -171,15 +157,16 @@ struct CreationScreen: View {
             Text("描述你想要的声音")
                 .font(.system(size: 13, weight: .semibold))
 
-            TextEditor(text: $voiceDescription)
+            Text("温和沉静的叙述者，语速舒缓，像在窗边与朋友交谈。")
                 .font(.system(size: 13))
-                .scrollContentBackground(.hidden)
-                .padding(8)
+                .foregroundStyle(.secondary)
+                .padding(11)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
                 .frame(height: 100)
                 .background(StudioPalette.background,
                             in: RoundedRectangle(cornerRadius: 8))
                 .overlay(RoundedRectangle(cornerRadius: 8).stroke(StudioPalette.stroke))
-                .accessibilityLabel("声音描述，界面样例")
+                .accessibilityLabel("声音描述只读预览")
 
             Button {} label: {
                 Label("添加参考音色", systemImage: "plus")
@@ -201,23 +188,19 @@ struct CreationScreen: View {
             HStack(alignment: .top, spacing: 10) {
                 VStack(alignment: .leading, spacing: 5) {
                     Text("输出格式")
-                    Picker("格式", selection: $format) {
-                        Text("MP3").tag("MP3")
-                        Text("WAV").tag("WAV")
-                        Text("PCM").tag("PCM")
-                    }
-                    .labelsHidden()
-                    .frame(maxWidth: .infinity)
+                    Text("WAV")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(7)
+                        .background(StudioPalette.background,
+                                    in: RoundedRectangle(cornerRadius: 6))
                 }
                 VStack(alignment: .leading, spacing: 5) {
                     Text("采样率")
-                    Picker("采样率", selection: $sampleRate) {
-                        Text("48 kHz").tag("48 kHz")
-                        Text("44.1 kHz").tag("44.1 kHz")
-                        Text("24 kHz").tag("24 kHz")
-                    }
-                    .labelsHidden()
-                    .frame(maxWidth: .infinity)
+                    Text("48 kHz")
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(7)
+                        .background(StudioPalette.background,
+                                    in: RoundedRectangle(cornerRadius: 6))
                 }
             }
             .font(.system(size: 11))
@@ -247,14 +230,17 @@ struct CreationScreen: View {
             Text("生成候选")
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
-            Picker("生成候选", selection: $candidates) {
-                Text("1").tag(1)
-                Text("2").tag(2)
-                Text("3").tag(3)
+            HStack(spacing: 0) {
+                ForEach(1...3, id: \.self) { number in
+                    Text("\(number)")
+                        .font(.system(size: 12, weight: number == 1 ? .semibold : .regular))
+                        .frame(width: 34, height: 27)
+                        .background(number == 1 ? StudioPalette.greenSoft : .clear)
+                        .foregroundStyle(number == 1 ? StudioPalette.green : .secondary)
+                }
             }
-            .pickerStyle(.segmented)
-            .labelsHidden()
-            .frame(width: 105)
+            .clipShape(RoundedRectangle(cornerRadius: 7))
+            .overlay(RoundedRectangle(cornerRadius: 7).stroke(StudioPalette.stroke))
 
             Button {} label: {
                 Label("生成音频", systemImage: "waveform")

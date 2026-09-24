@@ -2,7 +2,14 @@ import SwiftUI
 
 struct LibraryScreen: View {
     @State private var tab = 0
-    @State private var search = ""
+
+    private var emptyTitle: String {
+        switch tab {
+        case 1: "还没有项目"
+        case 2: "回收站是空的"
+        default: "还没有生成记录"
+        }
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 20) {
@@ -23,8 +30,14 @@ struct LibraryScreen: View {
             .frame(width: 320)
 
             HStack(spacing: 12) {
-                TextField("搜索作品、项目或文案…", text: $search)
-                    .textFieldStyle(.roundedBorder)
+                Label("搜索作品、项目或文案 · 后续接入", systemImage: "magnifyingglass")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 10)
+                    .frame(height: 27)
+                    .background(StudioPalette.surface, in: RoundedRectangle(cornerRadius: 6))
+                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(StudioPalette.stroke))
                     .frame(maxWidth: 490)
 
                 Picker("类型", selection: .constant("全部类型")) {
@@ -48,7 +61,7 @@ struct LibraryScreen: View {
                     .frame(width: 76, height: 76)
                     .background(StudioPalette.greenSoft, in: Circle())
 
-                Text(tab == 2 ? "回收站是空的" : "还没有生成记录")
+                Text(emptyTitle)
                     .font(StudioTypography.serif(22))
                 Text("本地作品库将在数据存储接入后显示。")
                     .font(.system(size: 13))
