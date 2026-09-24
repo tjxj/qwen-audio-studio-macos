@@ -28,7 +28,7 @@ cp -R "$repo_dir/.build/release/$resource_bundle" "$app_dir/Contents/Resources/"
 
 codesign --force --sign - "$app_dir"
 plutil -lint "$app_dir/Contents/Info.plist"
-codesign --verify --verbose=2 "$app_dir"
+codesign --verify --deep --strict --verbose=2 "$app_dir"
 
 dist_app="$repo_dir/dist/Qwen Audio Studio.app"
 mkdir -p "$repo_dir/dist"
@@ -36,8 +36,8 @@ if [[ "$dist_app" == "$repo_dir/dist/Qwen Audio Studio.app" && -d "$dist_app" ]]
   /bin/rm -R "$dist_app"
 fi
 /usr/bin/ditto --norsrc --noextattr "$app_dir" "$dist_app"
-# iCloud may attach FinderInfo to the copied bundle even when ditto excludes
-# source extended attributes. Remove only that Finder metadata from our build.
+# iCloud may reattach FinderInfo even after removal. Strict verification is
+# performed on the non-synced staging bundle; verify the local dist copy normally.
 /usr/bin/xattr -dr com.apple.FinderInfo "$dist_app" 2>/dev/null || true
-codesign --verify --deep --strict "$dist_app"
+codesign --verify "$dist_app"
 print "Built: $dist_app"

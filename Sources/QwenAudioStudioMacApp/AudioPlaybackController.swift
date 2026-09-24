@@ -4,7 +4,18 @@ import CoreAudio
 import Observation
 import StudioCore
 
-enum AudioPlaybackError: Error { case missingAsset, invalidLoop, unavailable, superseded }
+enum AudioPlaybackError: Error { case missingAsset, invalidLoop, unavailable, superseded, assetUnavailable, outputUnavailable }
+
+@MainActor protocol RealtimeAudioOutput: AnyObject {
+    var volume: Float { get set }
+    var currentTime: TimeInterval { get set }
+    var isPlaying: Bool { get }
+    func prepareToPlay() -> Bool
+    func play() -> Bool
+    func pause()
+    func stop()
+}
+extension AVAudioPlayer: RealtimeAudioOutput {}
 
 /// The only real-time output owner, shared by results and reference previews.
 @MainActor @Observable final class AudioPlaybackController {
@@ -12,7 +23,8 @@ enum AudioPlaybackError: Error { case missingAsset, invalidLoop, unavailable, su
     static let shared = AudioPlaybackController(loader: { _ in throw AudioPlaybackError.missingAsset })
 
     private var loader: (String) async throws -> DecodedAudio
-    @ObservationIgnored private var player: AVAudioPlayer?
+    private let makeOutput: (Data) throws -> any RealtimeAudioOutput
+    @ObservationIgnored private var player: (any RealtimeAudioOutput)?
     private var current: DecodedAudio?
     private var comparison: (a: DecodedAudio, b: DecodedAudio, aID: String, bID: String)?
     @ObservationIgnored private var loopTask: Task<Void, Never>?
@@ -28,13 +40,17 @@ enum AudioPlaybackError: Error { case missingAsset, invalidLoop, unavailable, su
         if let comparison { return min(comparison.a.duration, comparison.b.duration) }
         return current?.duration ?? 0
     }
+    var hasLoop: Bool { loop != nil }
     var isPreview: Bool { preview }
     var position: Double {
         guard state == .playing, let player else { return heldPosition }
         return min(duration, player.currentTime)
     }
 
-    init(loader: @escaping (String) async throws -> DecodedAudio) { self.loader = loader }
+    init(loader: @escaping (String) async throws -> DecodedAudio,
+         makeOutput: @escaping (Data) throws -> any RealtimeAudioOutput = { try AVAudioPlayer(data: $0) }) {
+        self.loader = loader; self.makeOutput = makeOutput
+    }
     func startMonitoringRoute() {
         guard routeListener == nil else { return }
         var address = AudioObjectPropertyAddress(mSelector: kAudioHardwarePropertyDefaultOutputDevice,
@@ -55,10 +71,16 @@ enum AudioPlaybackError: Error { case missingAsset, invalidLoop, unavailable, su
     func play(assetID: String) async throws {
         stop(); state = .preparing
         let token = operationGeneration
-        do {
-            let decoded = try await loader(assetID)
+        let decoded: DecodedAudio
+        do { decoded = try await loader(assetID) }
+        catch {
             guard token == operationGeneration else { throw AudioPlaybackError.superseded }
-            guard decoded.sampleRate == AudioDecoder.playbackRate else { throw AudioPlaybackError.unavailable }
+            stop(); state = .failed
+            throw AudioPlaybackError.assetUnavailable
+        }
+        guard token == operationGeneration else { throw AudioPlaybackError.superseded }
+        do {
+            guard decoded.sampleRate == AudioDecoder.playbackRate else { throw AudioPlaybackError.assetUnavailable }
             current = decoded; activeAssetID = assetID
             try start(at: 0)
         } catch { if token == operationGeneration { stop(); state = .failed }; throw error }
@@ -75,15 +97,19 @@ enum AudioPlaybackError: Error { case missingAsset, invalidLoop, unavailable, su
         let time = (activeAssetID == assetA || activeAssetID == assetB) ? position : 0
         operationGeneration += 1
         let token = operationGeneration
-        pause(); state = .preparing
-        do {
-            let a = try await loader(assetA), b = try await loader(assetB)
+        pause(); clearLoop(); state = .preparing
+        let a: DecodedAudio, b: DecodedAudio
+        do { a = try await loader(assetA); b = try await loader(assetB) }
+        catch {
             guard token == operationGeneration else { throw AudioPlaybackError.superseded }
-            comparison = (a, b, assetA, assetB)
-            current = a; activeAssetID = assetA; preview = false
-            heldPosition = min(time, a.duration, b.duration)
-            state = .paused
-        } catch { if token == operationGeneration { stop(); state = .failed }; throw error }
+            stop(); state = .failed
+            throw AudioPlaybackError.assetUnavailable
+        }
+        guard token == operationGeneration else { throw AudioPlaybackError.superseded }
+        comparison = (a, b, assetA, assetB)
+        current = a; activeAssetID = assetA; preview = false
+        heldPosition = min(time, a.duration, b.duration)
+        state = .paused
     }
     func switchToA() throws { try switchTo(.a) }
     func switchToB() throws { try switchTo(.b) }
@@ -121,7 +147,7 @@ enum AudioPlaybackError: Error { case missingAsset, invalidLoop, unavailable, su
         if heldPosition >= duration - 0.001 { try start(at: 0); return }
         if let player {
             player.currentTime = heldPosition
-            guard player.play() else { throw AudioPlaybackError.unavailable }
+            guard player.play() else { throw AudioPlaybackError.outputUnavailable }
             state = .playing; beginLoopMonitor()
         } else { try start(at: heldPosition) }
     }
@@ -144,12 +170,14 @@ enum AudioPlaybackError: Error { case missingAsset, invalidLoop, unavailable, su
         // Old output is stopped before a new player is allocated or started.
         player?.stop(); player = nil
         loopTask?.cancel(); loopTask = nil
-        let output = try AVAudioPlayer(data: Self.wav(current))
+        let output: any RealtimeAudioOutput
+        do { output = try makeOutput(Self.wav(current)) }
+        catch { throw AudioPlaybackError.outputUnavailable }
         output.volume = max(0, min(1, volume))
-        guard output.prepareToPlay() else { throw AudioPlaybackError.unavailable }
+        guard output.prepareToPlay() else { throw AudioPlaybackError.outputUnavailable }
         let target = max(0, min(duration, time))
         output.currentTime = target
-        guard output.play() else { throw AudioPlaybackError.unavailable }
+        guard output.play() else { throw AudioPlaybackError.outputUnavailable }
         player = output; heldPosition = target; state = .playing
         beginLoopMonitor()
     }

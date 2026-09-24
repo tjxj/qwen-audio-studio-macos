@@ -31,10 +31,13 @@ import StudioCore
             ResultCandidate(id: "b", number: 2, state: .success, assetID: "audio-b")
         ], loader: { _ in audio })
         try await transport.play(assetID: "audio-a")
+        try transport.setLoop(start: 0, end: 0.5)
+        controller.loopEnabled = true
         controller.select("b", player: transport)
         #expect(controller.selectedID == "b")
         #expect(transport.state == .idle)
         #expect(transport.activeAssetID == nil)
+        #expect(!controller.loopEnabled)
     }
     @Test func fileLostAfterValidationMarksPreviouslyReadyRowUnavailable() async throws {
         let audio = DecodedAudio(samples: Array(repeating: 0.2, count: 24_000), sampleRate: 24_000, contentHash: "synthetic")
@@ -47,6 +50,33 @@ import StudioCore
         #expect(controller.rows[0].status == .unavailable)
         #expect(!controller.rows[0].playable)
     }
+    @Test(arguments: ["prepare", "play", "construction"])
+    func outputDeviceFailureKeepsDecodedAssetReadyForRetry(stage: String) async throws {
+        let audio = DecodedAudio(samples: Array(repeating: 0.2, count: 24_000), sampleRate: 24_000, contentHash: "synthetic")
+        let controller = ResultScreenController(candidates: [ResultCandidate(id: "a", number: 1, state: .success, assetID: "audio-a")],
+            loader: { _ in audio })
+        await controller.validate()
+        let transport = AudioPlaybackController(loader: { _ in audio }, makeOutput: { _ in
+            if stage == "construction" { throw AudioPlaybackError.outputUnavailable }
+            return FakeAudioOutput(prepareSucceeds: stage != "prepare", playSucceeds: stage != "play")
+        })
+        await controller.play("a", player: transport)
+        #expect(controller.rows[0].status == .ready)
+        #expect(controller.rows[0].playable)
+        #expect(controller.message?.contains("输出") == true)
+    }
+    @Test func comparisonOutputFailureKeepsBothAssetsReady() async {
+        let audio = DecodedAudio(samples: Array(repeating: 0.2, count: 24_000), sampleRate: 24_000, contentHash: "synthetic")
+        let controller = ResultScreenController(candidates: [
+            ResultCandidate(id: "a", number: 1, state: .success, assetID: "audio-a"),
+            ResultCandidate(id: "b", number: 2, state: .success, assetID: "audio-b")
+        ], loader: { _ in audio })
+        await controller.validate()
+        let transport = AudioPlaybackController(loader: { _ in audio }, makeOutput: { _ in FakeAudioOutput(prepareSucceeds: false, playSucceeds: true) })
+        await controller.compare(a: "a", b: "b", player: transport)
+        #expect(controller.rows.allSatisfy { $0.playable })
+        #expect(controller.message?.contains("输出") == true)
+    }
     @Test func comparisonSelectionTracksAudibleSide() async {
         let controller = ResultScreenController(candidates: [
             ResultCandidate(id: "a", number: 1, state: .success, assetID: "audio-a"),
@@ -58,4 +88,33 @@ import StudioCore
         controller.selectComparisonSide(.a)
         #expect(controller.selectedID == "a")
     }
+    @Test func invalidLoopToggleDoesNotPretendLoopIsActive() async throws {
+        let audio = DecodedAudio(samples: Array(repeating: 0.2, count: 24_000), sampleRate: 24_000, contentHash: "synthetic")
+        let player = AudioPlaybackController(loader: { _ in audio })
+        player.volume = 0
+        defer { player.stop() }
+        let controller = ResultScreenController(candidates: [ResultCandidate(id: "a", number: 1, state: .success, assetID: "audio-a")], loader: { _ in audio })
+        try await player.play(assetID: "audio-a")
+        controller.setLoop(enabled: true, start: 0, end: 0.3, player: player)
+        #expect(!controller.loopEnabled)
+        controller.setLoop(enabled: true, start: 0, end: 0.5, player: player)
+        #expect(controller.loopEnabled)
+        controller.setLoop(enabled: false, start: 0, end: 0.5, player: player)
+        #expect(!controller.loopEnabled)
+    }
+}
+
+@MainActor private final class FakeAudioOutput: RealtimeAudioOutput {
+    var volume: Float = 0
+    var currentTime: TimeInterval = 0
+    var isPlaying: Bool = false
+    let prepareSucceeds: Bool
+    let playSucceeds: Bool
+    init(prepareSucceeds: Bool, playSucceeds: Bool) {
+        self.prepareSucceeds = prepareSucceeds; self.playSucceeds = playSucceeds
+    }
+    func prepareToPlay() -> Bool { prepareSucceeds }
+    func play() -> Bool { isPlaying = playSucceeds; return playSucceeds }
+    func pause() { isPlaying = false }
+    func stop() { isPlaying = false }
 }

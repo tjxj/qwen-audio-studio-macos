@@ -38,6 +38,7 @@ import StudioCore
     var name = ""
     var persistent = false
     var busy = false
+    private(set) var previewPending = false
     var message: String?
     var quality: AudioSignalQuality?
     var library: [ReferenceSnapshot] = []
@@ -85,7 +86,10 @@ import StudioCore
     }
     func preview(source: Bool) async {
         guard let imported else { return }
+        cancelPreview()
+        previewPending = true
         let token = previewEpoch, key = selectionKey, start = start, end = end
+        defer { if token == previewEpoch { previewPending = false } }
         do {
             let result = try await previewLoader(imported, source, start, end)
             guard token == previewEpoch, key == selectionKey, !Task.isCancelled else { return }
@@ -95,7 +99,10 @@ import StudioCore
         } catch { if token == previewEpoch { message = Self.explain(error) } }
     }
     func previewLibrary(referenceID: String) async {
+        cancelPreview()
+        previewPending = true
         let token = previewEpoch
+        defer { if token == previewEpoch { previewPending = false } }
         do {
             let item = try await service.prepared(referenceID: referenceID)
             guard token == previewEpoch, !Task.isCancelled else { return }
@@ -105,6 +112,7 @@ import StudioCore
     }
     func cancelPreview() {
         previewEpoch += 1
+        previewPending = false
         playback.stop()
     }
     private func selectionChanged() {
@@ -213,8 +221,8 @@ struct VoiceSheet: View {
                                 .font(.caption).foregroundStyle(.secondary)
                             HStack {
                                 Button("试听完整源音频") { Task { await controller.preview(source: true) } }
-                                Button("停止") { ReferencePlayback.shared.stop() }
-                                    .disabled(ReferencePlayback.shared.state == .stopped)
+                                Button("停止") { controller.cancelPreview() }
+                                    .disabled(ReferencePlayback.shared.state == .stopped && !controller.previewPending)
                                 Text(playbackTitle).font(.caption).foregroundStyle(.secondary)
                             }
                         }.padding(12).frame(maxWidth: .infinity, alignment: .leading)

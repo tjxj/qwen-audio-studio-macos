@@ -31,6 +31,7 @@ struct ResultRow: Identifiable {
     var compareID: String?
     private var compareAID: String?
     var message: String?
+    var loopEnabled = false
     init(candidates: [ResultCandidate], loader: @escaping (String) async throws -> DecodedAudio) {
         rows = candidates.map { ResultRow(candidate: $0, status: $0.assetID == nil ? .noAudio : .checking) }
         self.loader = loader
@@ -62,6 +63,7 @@ struct ResultRow: Identifiable {
             compareID = nil
             compareAID = nil
             message = nil
+            loopEnabled = false
         }
         selectedID = id
     }
@@ -71,6 +73,20 @@ struct ResultRow: Identifiable {
     }
     func selectComparisonSide(_ side: ComparisonSide) {
         selectedID = side == .a ? compareAID : compareID
+    }
+    func setLoop(enabled: Bool, start: Double, end: Double, player: AudioPlaybackController) {
+        if enabled {
+            do {
+                try player.setLoop(start: start, end: end)
+                loopEnabled = true; message = nil
+            } catch {
+                player.clearLoop()
+                loopEnabled = false
+                message = "循环选区需至少 0.5 秒，且在当前版本范围内。"
+            }
+        } else {
+            player.clearLoop(); loopEnabled = false
+        }
     }
     func play(_ id: String, player: AudioPlaybackController) async {
         guard let index = rows.firstIndex(where: { $0.id == id }), rows[index].playable,
@@ -82,9 +98,33 @@ struct ResultRow: Identifiable {
             message = nil
         } catch {
             if case AudioPlaybackError.superseded = error { return }
-            rows[index].status = .unavailable
-            rows[index].waveform = []
-            message = "此版本无法播放，请检查原文件和目录授权。"
+            if case AudioPlaybackError.outputUnavailable = error {
+                message = "音频输出暂不可用，请检查设备后重试。"
+            } else {
+                rows[index].status = .unavailable
+                rows[index].waveform = []
+                message = "此版本无法播放，请检查原文件和目录授权。"
+            }
+        }
+    }
+    func compare(a: String, b: String, player: AudioPlaybackController) async {
+        guard let aRow = rows.first(where: { $0.id == a && $0.playable }),
+              let bRow = rows.first(where: { $0.id == b && $0.playable }),
+              let aAsset = aRow.candidate.assetID, let bAsset = bRow.candidate.assetID else { return }
+        loopEnabled = false
+        do {
+            try await player.compare(assetA: aAsset, assetB: bAsset)
+            try player.switchToA()
+            beginComparison(a: a, b: b)
+            message = nil
+        } catch {
+            if case AudioPlaybackError.superseded = error { return }
+            if case AudioPlaybackError.outputUnavailable = error {
+                message = "音频输出暂不可用，请检查设备后重试 A/B。"
+            } else {
+                await validate()
+                message = "比较版本的文件无法读取或解码，请检查目录授权。"
+            }
         }
     }
 }
@@ -97,7 +137,6 @@ struct ResultScreen: View {
     @State private var isSeeking = false
     @State private var loopStart = 0.0
     @State private var loopEnd = 0.5
-    @State private var useLoop = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
@@ -187,16 +226,14 @@ struct ResultScreen: View {
                             Slider(value: Binding(get: { Double(player.volume) }, set: { player.volume = Float($0) }), in: 0...1)
                                 .frame(width: 145).accessibilityLabel("音量")
                             Divider().frame(height: 19)
-                            Toggle("选区循环", isOn: $useLoop).toggleStyle(.checkbox)
-                                .onChange(of: useLoop) { _, enabled in
-                                    if enabled { try? player.setLoop(start: loopStart, end: loopEnd) }
-                                    else { player.clearLoop() }
-                                }
+                            Toggle("选区循环", isOn: Binding(get: { controller.loopEnabled },
+                                set: { controller.setLoop(enabled: $0, start: loopStart, end: loopEnd, player: player) }))
+                                .toggleStyle(.checkbox)
                             TextField("起点", value: $loopStart, format: .number.precision(.fractionLength(2))).frame(width: 58)
                             Text("—")
                             TextField("终点", value: $loopEnd, format: .number.precision(.fractionLength(2))).frame(width: 58)
                             Text("秒").foregroundStyle(.secondary)
-                            Button("应用") { try? player.setLoop(start: loopStart, end: loopEnd); useLoop = true }
+                            Button("应用") { controller.setLoop(enabled: true, start: loopStart, end: loopEnd, player: player) }
                                 .disabled(!row.playable)
                         }.font(.caption)
                         if let message = controller.message { Text(message).font(.caption).foregroundStyle(.orange) }
@@ -251,10 +288,7 @@ struct ResultScreen: View {
         selectedPosition = player.position
     }
     private func compare(_ row: ResultRow) async {
-        guard let a = row.candidate.assetID,
-              let bRow = controller.rows.first(where: { $0.id != row.id && $0.playable }),
-              let b = bRow.candidate.assetID else { return }
-        do { try await player.compare(assetA: a, assetB: b); try player.switchToA(); controller.beginComparison(a: row.id, b: bRow.id) }
-        catch { controller.message = "无法比较这两个版本，请重新验证音频。" }
+        guard let bRow = controller.rows.first(where: { $0.id != row.id && $0.playable }) else { return }
+        await controller.compare(a: row.id, b: bRow.id, player: player)
     }
 }

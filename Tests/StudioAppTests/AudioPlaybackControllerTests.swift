@@ -23,7 +23,10 @@ import StudioCore
         let player = AudioPlaybackController(loader: { id in id == "a" ? a : b })
         player.volume = 0
         defer { player.stop() }
+        try await player.play(assetID: "b")
+        try player.setLoop(start: 6, end: 7)
         try await player.compare(assetA: "a", assetB: "b")
+        #expect(!player.hasLoop)
         try player.switchToB()
         #expect(player.duration == 5)
         try player.seek(seconds: 7)
