@@ -234,14 +234,14 @@ public actor StudioStore {
         }
         guard valid else { throw StudioStoreError.invalidTransition }
         return try db.transaction {
-            let changed = try db.execute("UPDATE jobs SET state=?,message=? WHERE id=? AND state=?", [.text(to.rawValue), message.map(SQLiteValue.text) ?? .null, .text(id), .text(from.rawValue)]) == 1
+            let changed = try db.execute("UPDATE jobs SET state=?,message=? WHERE id=? AND state=?", [.text(to.rawValue), message.map { .text(Self.safeJobMessage($0)) } ?? .null, .text(id), .text(from.rawValue)]) == 1
             if changed && to.isTerminal { try db.execute("DELETE FROM reference_leases WHERE job_id=?", [.text(id)]) }
             return changed
         }
     }
     public func markResultUncertain(id: String, message: String) throws -> Bool {
         try db.transaction {
-            let changed = try db.execute("UPDATE jobs SET state='interrupted',result_uncertain=1,message=? WHERE id=? AND state='requesting'", [.text(message), .text(id)]) == 1
+            let changed = try db.execute("UPDATE jobs SET state='interrupted',result_uncertain=1,message=? WHERE id=? AND state='requesting'", [.text(Self.safeJobMessage(message)), .text(id)]) == 1
             if changed { try db.execute("DELETE FROM reference_leases WHERE job_id=?", [.text(id)]) }
             return changed
         }
@@ -249,7 +249,9 @@ public actor StudioStore {
 
     /// The only requesting → downloading transition. Commit the receipt BEFORE GET.
     public func recordProviderResponse(id: String, response: ProviderResponseSnapshot) throws -> Bool {
-        guard !response.providerRequestID.isEmpty, response.audioURL.scheme?.lowercased() == "https",
+        guard !response.providerRequestID.isEmpty, response.providerRequestID.utf8.count <= 128,
+              response.providerRequestID.utf8.allSatisfy({ (65...90).contains($0) || (97...122).contains($0) || (48...57).contains($0) || $0 == 45 || $0 == 95 }),
+              response.audioURL.scheme?.lowercased() == "https",
               response.audioURL.host?.isEmpty == false else { throw StudioStoreError.invalidSubmission }
         return try db.transaction {
             try db.execute("UPDATE jobs SET provider_response=?,state='downloading',message=NULL WHERE id=? AND state='requesting'",
@@ -338,6 +340,14 @@ public actor StudioStore {
     }
     private static func safeRelativePath(_ path: String) -> Bool {
         !path.isEmpty && !path.hasPrefix("/") && !path.contains("\0") && !path.split(separator: "/", omittingEmptySubsequences: false).contains(where: { $0 == ".." || $0 == "." || $0.isEmpty })
+    }
+    private static func safeJobMessage(_ input: String) -> String {
+        var value = input
+        for pattern in [#"(?i)(?:https?|file)://[^\s\"'<>]+"#, #"(?i)bearer\s+[^\s\"'<>]+"#,
+                        #"(?i)sk-[a-z0-9_-]{8,}"#, #"(?i)(?:api[_-]?key|workspace[_-]?id)\s*[:=]\s*[^\s\"'<>]+"#] {
+            value = value.replacingOccurrences(of: pattern, with: "[已脱敏]", options: .regularExpression)
+        }
+        return String(value.prefix(300))
     }
 
     public func listTemplates() throws -> [StudioTemplate] {

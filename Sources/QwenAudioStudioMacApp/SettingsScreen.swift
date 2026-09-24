@@ -1,20 +1,38 @@
 import SwiftUI
+import StudioCore
 
 struct SettingsScreen: View {
     @Environment(StudioPreferences.self) private var preferences
     @Environment(OutputFolderController.self) private var outputFolders
     @State private var apiKey = ""
     @State private var workspaceID = ""
+    @State private var credentialStatus = "凭据尚未检查"
+    private let credentials = NativeCredentialStore()
 
     var body: some View {
         @Bindable var preferences = preferences
         Form {
             Section("百炼连接") {
                 SecureField("API Key", text: $apiKey)
-                    .disabled(true)
+                    .textContentType(.password)
+                Button("保存 API Key") {
+                    do { try credentials.saveAPIKey(apiKey); apiKey = ""; refreshCredentialStatus() }
+                    catch { credentialStatus = "API Key 保存失败，请检查输入或钥匙串权限。" }
+                }.disabled(apiKey.isEmpty)
                 TextField("Workspace ID", text: $workspaceID)
-                    .disabled(true)
-                Text("凭据存储将在后续阶段接入。当前字段不会保存或发起请求。")
+                Button("保存 Workspace ID") {
+                    do { try credentials.saveWorkspaceID(workspaceID); workspaceID = ""; refreshCredentialStatus() }
+                    catch { credentialStatus = "Workspace ID 保存失败，请检查格式或钥匙串权限。" }
+                }.disabled(workspaceID.isEmpty)
+                Button("读取已有本地配置") {
+                    do {
+                        let imported = try credentials.importLegacy()
+                        let suffix = imported.failed ? "部分字段保存失败，请单独检查并填写；已保存字段保留。" : "旧条目保留。"
+                        credentialStatus = imported.apiKey || imported.workspaceID ? "已读取旧版本地配置。\(suffix)" : "未找到可读取的旧版配置，或保存失败；请手动填写。"
+                    } catch { credentialStatus = "读取旧版配置失败，请手动填写；已保存字段保留。" }
+                }
+                Link("查看百炼 API 配置说明", destination: URL(string: "https://help.aliyun.com/zh/model-studio/audio-generation-api")!)
+                Text(credentialStatus)
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -49,5 +67,14 @@ struct SettingsScreen: View {
         .formStyle(.grouped)
         .frame(width: 650, height: 500)
         .navigationTitle("设置")
+        .onAppear(perform: refreshCredentialStatus)
+    }
+
+    private func refreshCredentialStatus() {
+        do {
+            let key = try credentials.hasAPIKey()
+            let workspace = try credentials.workspaceID() != nil
+            credentialStatus = "API Key：\(key ? "已保存" : "未设置") · Workspace ID：\(workspace ? "已保存" : "未设置")"
+        } catch { credentialStatus = "钥匙串读取失败，请检查本机权限。" }
     }
 }

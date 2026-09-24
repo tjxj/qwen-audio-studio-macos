@@ -86,8 +86,18 @@ public struct ProviderResponseSnapshot: Codable, Equatable, Sendable, CustomStri
     public let providerRequestID: String
     public let audioURL: URL
     public let receivedAt: Date
-    public init(providerRequestID: String, audioURL: URL, receivedAt: Date = Date()) {
+    public let expiresAt: Date
+    public init(providerRequestID: String, audioURL: URL, receivedAt: Date = Date(), expiresAt: Date? = nil) {
         self.providerRequestID = providerRequestID; self.audioURL = audioURL; self.receivedAt = receivedAt
+        self.expiresAt = expiresAt ?? receivedAt.addingTimeInterval(24 * 3600)
+    }
+    private enum CodingKeys: String, CodingKey { case providerRequestID, audioURL, receivedAt, expiresAt }
+    public init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        providerRequestID = try values.decode(String.self, forKey: .providerRequestID)
+        audioURL = try values.decode(URL.self, forKey: .audioURL)
+        receivedAt = try values.decode(Date.self, forKey: .receivedAt)
+        expiresAt = try values.decodeIfPresent(Date.self, forKey: .expiresAt) ?? receivedAt.addingTimeInterval(24 * 3600)
     }
     public var description: String { "ProviderResponseSnapshot(<redacted>)" }
     public var debugDescription: String { description }
