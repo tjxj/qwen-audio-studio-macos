@@ -28,6 +28,10 @@ import StudioCore
 
 @MainActor @Observable final class VoiceSheetController {
     let service: ReferenceAudioService
+    private let playback: ReferencePlayback
+    typealias PreviewLoader = (ImportedReference, Bool, Double, Double) async throws -> (Data, AudioSignalQuality?)
+    private let previewLoader: PreviewLoader
+    private var previewEpoch = 0
     var imported: ImportedReference? { didSet { if oldValue?.id != imported?.id { selectionChanged() } } }
     var start = 0.0 { didSet { if oldValue != start { selectionChanged() } } }
     var end = 0.0 { didSet { if oldValue != end { selectionChanged() } } }
@@ -40,7 +44,14 @@ import StudioCore
     private var warnedSelection: String?
     var selectionKey: String { "\(imported?.id ?? ""):\(start):\(end)" }
     var requiresQualityAcknowledgement: Bool { warnedSelection == selectionKey }
-    init(service: ReferenceAudioService) { self.service = service }
+    init(service: ReferenceAudioService, playback: ReferencePlayback = .shared, previewLoader: PreviewLoader? = nil) {
+        self.service = service; self.playback = playback
+        self.previewLoader = previewLoader ?? { imported, source, start, end in
+            if source { return (try await service.sourcePreview(importID: imported.id), nil) }
+            let item = try await service.preview(importID: imported.id, start: start, end: end)
+            return (item.data, item.quality)
+        }
+    }
     var selectionValid: Bool {
         guard let imported else { return false }
         return start.isFinite && end.isFinite && start >= 0 && end > start && end <= imported.duration && end - start <= 30
@@ -64,7 +75,7 @@ import StudioCore
         await importURL(url)
     }
     func importURL(_ url: URL) async {
-        busy = true; message = nil; ReferencePlayback.shared.stop()
+        cancelPreview(); busy = true; message = nil
         defer { busy = false }
         do {
             let source = try await service.importSource(url: url)
@@ -74,19 +85,31 @@ import StudioCore
     }
     func preview(source: Bool) async {
         guard let imported else { return }
+        let token = previewEpoch, key = selectionKey, start = start, end = end
         do {
-            if source { try ReferencePlayback.shared.play(await service.sourcePreview(importID: imported.id), state: .source) }
-            else {
-                let preview = try await service.preview(importID: imported.id, start: start, end: end)
-                quality = preview.quality
-                try ReferencePlayback.shared.play(preview.data, state: .selection)
-            }
+            let result = try await previewLoader(imported, source, start, end)
+            guard token == previewEpoch, key == selectionKey, !Task.isCancelled else { return }
+            if let quality = result.1 { self.quality = quality }
+            try playback.play(result.0, state: source ? .source : .selection)
             message = nil
-        } catch { message = Self.explain(error) }
+        } catch { if token == previewEpoch { message = Self.explain(error) } }
+    }
+    func previewLibrary(referenceID: String) async {
+        let token = previewEpoch
+        do {
+            let item = try await service.prepared(referenceID: referenceID)
+            guard token == previewEpoch, !Task.isCancelled else { return }
+            try playback.play(item.data, state: .library)
+            message = nil
+        } catch { if token == previewEpoch { message = Self.explain(error) } }
+    }
+    func cancelPreview() {
+        previewEpoch += 1
+        playback.stop()
     }
     private func selectionChanged() {
         quality = nil; warnedSelection = nil; message = nil
-        ReferencePlayback.shared.stop()
+        cancelPreview()
     }
     func analyzeSelection() async {
         guard selectionValid, let imported else { quality = nil; return }
@@ -153,10 +176,7 @@ struct VoiceSheet: View {
                                     Text(voice.fileName).lineLimit(2)
                                     Text("\(voice.duration, specifier: "%.2f") 秒").font(.caption).foregroundStyle(.secondary)
                                     HStack {
-                                        Button("试听") { Task {
-                                            do { let item = try await controller.service.prepared(referenceID: voice.id); try ReferencePlayback.shared.play(item.data, state: .library) }
-                                            catch { controller.message = VoiceSheetController.explain(error) }
-                                        } }
+                                        Button("试听") { Task { await controller.previewLibrary(referenceID: voice.id) } }
                                         Button("使用") { Task {
                                             do { bind(try await controller.service.prepared(referenceID: voice.id)) }
                                             catch { controller.message = VoiceSheetController.explain(error) }
@@ -244,7 +264,7 @@ struct VoiceSheet: View {
             guard !Task.isCancelled else { return }
             await controller.analyzeSelection()
         }
-        .onDisappear { ReferencePlayback.shared.stop() }
+        .onDisappear { controller.cancelPreview() }
     }
     private var playbackTitle: String {
         switch ReferencePlayback.shared.state { case .stopped: ""; case .source: "正在试听源音频"; case .selection: "正在试听选区"; case .library: "正在试听本地音色" }

@@ -4,6 +4,35 @@ import StudioCore
 @testable import QwenAudioStudioMacApp
 
 @MainActor struct AudioPlaybackControllerTests {
+    @Test func naturalEndLeavesPausedCompletionAndReplayRestartsAtZero() async throws {
+        let audio = DecodedAudio(samples: Array(repeating: 0.2, count: 4_800), sampleRate: 24_000, contentHash: "short")
+        let player = AudioPlaybackController(loader: { _ in audio })
+        player.volume = 0
+        defer { player.stop() }
+        try await player.play(assetID: "short")
+        try await Task.sleep(for: .milliseconds(450))
+        #expect(player.state == .paused)
+        #expect(abs(player.position - 0.2) < 0.02)
+        try player.resume()
+        #expect(player.state == .playing)
+        #expect(player.position < 0.1)
+    }
+
+    @Test func comparisonSeeksAndLoopsWithinSharedFiveSecondRange() async throws {
+        let a = tone(seconds: 5, hertz: 440), b = tone(seconds: 8, hertz: 880)
+        let player = AudioPlaybackController(loader: { id in id == "a" ? a : b })
+        player.volume = 0
+        defer { player.stop() }
+        try await player.compare(assetA: "a", assetB: "b")
+        try player.switchToB()
+        #expect(player.duration == 5)
+        try player.seek(seconds: 7)
+        #expect(player.position <= 5)
+        #expect(throws: AudioPlaybackError.self) { try player.setLoop(start: 4.75, end: 5.25) }
+        try player.setLoop(start: 4.0, end: 4.5)
+        try player.switchToA()
+        #expect(player.position <= 5)
+    }
     @Test func delayedLoadCannotOverrideLaterPlaybackOrComparison() async throws {
         let gate = PlaybackLoaderGate()
         let short = tone(seconds: 5, hertz: 440)

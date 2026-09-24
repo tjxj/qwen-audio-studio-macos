@@ -29,6 +29,7 @@ struct ResultRow: Identifiable {
     private let cache = WaveformCache()
     var selectedID: String?
     var compareID: String?
+    private var compareAID: String?
     var message: String?
     init(candidates: [ResultCandidate], loader: @escaping (String) async throws -> DecodedAudio) {
         rows = candidates.map { ResultRow(candidate: $0, status: $0.assetID == nil ? .noAudio : .checking) }
@@ -54,6 +55,38 @@ struct ResultRow: Identifiable {
     }
     var selected: ResultRow? { rows.first { $0.id == selectedID } }
     var comparison: ResultRow? { rows.first { $0.id == compareID } }
+    func select(_ id: String, player: AudioPlaybackController) {
+        guard rows.contains(where: { $0.id == id }) else { return }
+        if selectedID != id {
+            player.stop()
+            compareID = nil
+            compareAID = nil
+            message = nil
+        }
+        selectedID = id
+    }
+    enum ComparisonSide { case a, b }
+    func beginComparison(a: String, b: String) {
+        compareAID = a; compareID = b; selectedID = a
+    }
+    func selectComparisonSide(_ side: ComparisonSide) {
+        selectedID = side == .a ? compareAID : compareID
+    }
+    func play(_ id: String, player: AudioPlaybackController) async {
+        guard let index = rows.firstIndex(where: { $0.id == id }), rows[index].playable,
+              let assetID = rows[index].candidate.assetID else { return }
+        do {
+            if player.activeAssetID == assetID && player.state == .playing { player.pause() }
+            else if player.activeAssetID == assetID && player.state == .paused { try player.resume() }
+            else { try await player.play(assetID: assetID) }
+            message = nil
+        } catch {
+            if case AudioPlaybackError.superseded = error { return }
+            rows[index].status = .unavailable
+            rows[index].waveform = []
+            message = "此版本无法播放，请检查原文件和目录授权。"
+        }
+    }
 }
 
 struct ResultScreen: View {
@@ -84,7 +117,7 @@ struct ResultScreen: View {
                     ScrollView {
                         LazyVStack(spacing: 8) {
                             ForEach(controller.rows) { row in
-                                Button { controller.selectedID = row.id; selectedPosition = 0 } label: {
+                                Button { controller.select(row.id, player: player); selectedPosition = 0 } label: {
                                     HStack(spacing: 9) {
                                         Image(systemName: row.playable ? "waveform" : "waveform.slash")
                                             .frame(width: 20)
@@ -138,8 +171,14 @@ struct ResultScreen: View {
                             Button("A/B 同位置") { Task { await compare(row) } }
                                 .disabled(!row.playable || controller.rows.filter(\.playable).count < 2)
                             if controller.compareID != nil {
-                                Button("A") { try? player.switchToA(); selectedPosition = player.position }
-                                Button("B") { try? player.switchToB(); selectedPosition = player.position }
+                                Button("A") {
+                                    do { try player.switchToA(); controller.selectComparisonSide(.a); selectedPosition = player.position }
+                                    catch { controller.message = "无法切换到 A 版本。" }
+                                }
+                                Button("B") {
+                                    do { try player.switchToB(); controller.selectComparisonSide(.b); selectedPosition = player.position }
+                                    catch { controller.message = "无法切换到 B 版本。" }
+                                }
                             }
                             Spacer()
                         }
@@ -208,20 +247,14 @@ struct ResultScreen: View {
         }
     }
     private func play(_ row: ResultRow) async {
-        guard let id = row.candidate.assetID else { return }
-        do {
-            if player.activeAssetID == id && player.state == .playing { player.pause() }
-            else if player.activeAssetID == id && player.state == .paused { try player.resume() }
-            else { try await player.play(assetID: id) }
-            selectedPosition = player.position
-            controller.message = nil
-        } catch { controller.message = "此版本无法播放，请检查原文件和目录授权。" }
+        await controller.play(row.id, player: player)
+        selectedPosition = player.position
     }
     private func compare(_ row: ResultRow) async {
         guard let a = row.candidate.assetID,
               let bRow = controller.rows.first(where: { $0.id != row.id && $0.playable }),
               let b = bRow.candidate.assetID else { return }
-        do { try await player.compare(assetA: a, assetB: b); controller.compareID = bRow.id; try player.switchToA() }
+        do { try await player.compare(assetA: a, assetB: b); try player.switchToA(); controller.beginComparison(a: row.id, b: bRow.id) }
         catch { controller.message = "无法比较这两个版本，请重新验证音频。" }
     }
 }

@@ -24,7 +24,10 @@ enum AudioPlaybackError: Error { case missingAsset, invalidLoop, unavailable, su
     private(set) var state: State = .idle
     private(set) var activeAssetID: String?
     var volume: Float = 0.8 { didSet { player?.volume = max(0, min(1, volume)) } }
-    var duration: Double { current?.duration ?? 0 }
+    var duration: Double {
+        if let comparison { return min(comparison.a.duration, comparison.b.duration) }
+        return current?.duration ?? 0
+    }
     var isPreview: Bool { preview }
     var position: Double {
         guard state == .playing, let player else { return heldPosition }
@@ -93,15 +96,15 @@ enum AudioPlaybackError: Error { case missingAsset, invalidLoop, unavailable, su
         try start(at: time)
     }
     func seek(seconds: Double) throws {
-        guard let current, seconds.isFinite else { throw AudioPlaybackError.unavailable }
-        let target = max(0, min(current.duration, seconds))
+        guard current != nil, seconds.isFinite else { throw AudioPlaybackError.unavailable }
+        let target = max(0, min(duration, seconds))
         heldPosition = target
         if let player { player.currentTime = target }
     }
     func backTenSeconds() throws { try seek(seconds: position - 10) }
     func setLoop(start: Double, end: Double) throws {
-        guard let current, start.isFinite, end.isFinite, start >= 0, end - start >= 0.5,
-              end <= current.duration else { throw AudioPlaybackError.invalidLoop }
+        guard current != nil, start.isFinite, end.isFinite, start >= 0, end - start >= 0.5,
+              end <= duration else { throw AudioPlaybackError.invalidLoop }
         loop = (start, end)
         if position < start || position >= end { try seek(seconds: start) }
         if state == .playing { beginLoopMonitor() }
@@ -115,6 +118,7 @@ enum AudioPlaybackError: Error { case missingAsset, invalidLoop, unavailable, su
     }
     func resume() throws {
         guard state == .paused else { return }
+        if heldPosition >= duration - 0.001 { try start(at: 0); return }
         if let player {
             player.currentTime = heldPosition
             guard player.play() else { throw AudioPlaybackError.unavailable }
@@ -143,7 +147,7 @@ enum AudioPlaybackError: Error { case missingAsset, invalidLoop, unavailable, su
         let output = try AVAudioPlayer(data: Self.wav(current))
         output.volume = max(0, min(1, volume))
         guard output.prepareToPlay() else { throw AudioPlaybackError.unavailable }
-        let target = max(0, min(current.duration, time))
+        let target = max(0, min(duration, time))
         output.currentTime = target
         guard output.play() else { throw AudioPlaybackError.unavailable }
         player = output; heldPosition = target; state = .playing
@@ -151,11 +155,17 @@ enum AudioPlaybackError: Error { case missingAsset, invalidLoop, unavailable, su
     }
     private func beginLoopMonitor() {
         loopTask?.cancel()
-        guard loop != nil else { return }
         loopTask = Task { [weak self] in
             while !Task.isCancelled {
-                guard let self, self.state == .playing, let loop = self.loop, let player = self.player else { return }
-                if player.currentTime >= loop.end { player.currentTime = loop.start; self.heldPosition = loop.start }
+                guard let self, self.state == .playing, let player = self.player else { return }
+                if let loop = self.loop, player.currentTime >= loop.end {
+                    if player.isPlaying { player.currentTime = loop.start; self.heldPosition = loop.start }
+                    else { try? self.start(at: loop.start); return }
+                } else if !player.isPlaying || player.currentTime >= self.duration - 0.001 {
+                    self.heldPosition = self.duration
+                    player.stop(); self.player = nil; self.state = .paused
+                    return
+                }
                 try? await Task.sleep(for: .milliseconds(20))
             }
         }

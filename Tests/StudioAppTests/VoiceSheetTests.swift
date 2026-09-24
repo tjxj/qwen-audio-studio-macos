@@ -5,6 +5,44 @@ import StudioCore
 @testable import QwenAudioStudioMacApp
 
 @MainActor struct VoiceSheetTests {
+    @Test func delayedPreviewCannotStealResultsAfterTrimChangeOrDismissal() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("synthetic.wav")
+        let format = AVAudioFormat(standardFormatWithSampleRate: 24_000, channels: 1)!
+        let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 48_000)!
+        buffer.frameLength = 48_000
+        for i in 0..<48_000 { buffer.floatChannelData![0][i] = 0.2 }
+        try autoreleasepool { let file = try AVAudioFile(forWriting: source, settings: format.settings); try file.write(from: buffer) }
+        let store = try StudioStore(dataRoot: root.appendingPathComponent("metadata"))
+        let service = try ReferenceAudioService(root: root.appendingPathComponent("audio"), store: store)
+        let result = DecodedAudio(samples: Array(repeating: 0.2, count: 48_000), sampleRate: 24_000, contentHash: "result")
+        let transport = AudioPlaybackController(loader: { _ in result })
+        transport.volume = 0
+        defer { transport.stop() }
+        let preview = ReferencePlayback(transport: transport)
+        let gate = VoicePreviewGate()
+        let controller = VoiceSheetController(service: service, playback: preview,
+            previewLoader: { _, _, _, _ in await gate.load() })
+        await controller.importURL(source)
+        controller.start = 0; controller.end = 1
+        try await transport.play(assetID: "result")
+        let first = Task { await controller.preview(source: false) }
+        await gate.untilWaiting()
+        controller.start = 0.5
+        gate.release((try Data(contentsOf: source), nil))
+        await first.value
+        #expect(transport.activeAssetID == "result")
+        #expect(preview.state == .stopped)
+        let second = Task { await controller.preview(source: false) }
+        await gate.untilWaiting()
+        controller.cancelPreview()
+        gate.release((try Data(contentsOf: source), nil))
+        await second.value
+        #expect(transport.activeAssetID == "result")
+        #expect(preview.state == .stopped)
+    }
     @Test(arguments: [Float(0), Float(1), Float(0.25)])
     func savingAnalyzesCurrentSelectionAndWarnsBeforeSilenceOrClipping(amplitude: Float) async throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
@@ -41,4 +79,13 @@ import StudioCore
         let full = DraftFields(prompt: "@voice1 @voice2 @voice3")
         #expect(VoiceSheetController.nextSlot(fields: full) == nil)
     }
+}
+
+@MainActor private final class VoicePreviewGate {
+    private var waiting: CheckedContinuation<(Data, AudioSignalQuality?), Never>?
+    func load() async -> (Data, AudioSignalQuality?) { await withCheckedContinuation { waiting = $0 } }
+    func untilWaiting() async {
+        for _ in 0..<100 where waiting == nil { try? await Task.sleep(for: .milliseconds(5)) }
+    }
+    func release(_ payload: (Data, AudioSignalQuality?)) { waiting?.resume(returning: payload); waiting = nil }
 }
