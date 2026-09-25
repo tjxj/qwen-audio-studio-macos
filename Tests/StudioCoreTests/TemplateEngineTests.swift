@@ -34,7 +34,7 @@ struct TemplateEngineTests {
             ["unknown": .text("a")], ["show": .text(String(repeating: "🎵", count: 81))],
             ["show": .text("{{other}}")], ["show": .text(" ")], ["show": .number(1)],
             ["show": .text("sk-" + String(repeating: "x", count: 24))],
-            ["show": .text("data:audio/wav;base64,AAAA")], ["show": .text("llm-abcdefgh1234")]
+            ["show": .text("data:audio/wav;base64,AAAA")], ["show": .text("llm-" + "abcdefgh1234")]
         ] { #expect(throws: TemplateError.self) { try engine.preview(templateID: "rain-podcast", values: values) } }
         #expect(throws: TemplateError.self) { try engine.preview(templateID: "missing", values: [:]) }
     }

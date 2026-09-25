@@ -4,7 +4,7 @@
 
 | 需求组 | 已有证据 | 状态与边界 |
 | --- | --- | --- |
-| 1. 完全原生运行与单屏布局 | `scripts/build-app.sh`；`docs/qa/task10/creation-window-checks.txt`；`otool -L` 仅系统库 | 1120×720、1280×720、1400×860、1600×900 均有浅/深 2× 截图，创作台窗口无整体滚动；长脚本只在编辑区滚动。 |
+| 1. 完全原生运行与单屏布局 | `scripts/build-app.sh`；`docs/qa/task10/creation-window-checks.txt`；`otool -L` 仅系统库 | 1120×720、1280×720、1400×860、1600×875 均有浅/深 2× 截图，创作台窗口无整体滚动；长脚本只在编辑区滚动。1600×900 未单独验收。 |
 | 2. 明暗模式、字体、对齐与精简导航 | `docs/qa/task10/creation-*-*.png`、`library-*-*.png`、`templates-*-*.png`；思源宋体与 OFL 随 App 打包 | 截图人工核查，无主要控件溢出；设备级辅助显示设置未覆盖。 |
 | 3. 七种模式与可编辑创作台 | `StudioModelsTests`、`PromptCompilerTests`、`AppStateTests`；创作台截图 | 模式和脚本编辑自动验证；实体键盘全面走查待验。 |
 | 4. 草稿自动保存、重启恢复、版本与冲突 | `DraftTests`、`AppStateTests`、`EditorTests`、`TemplateApplicationTests` | SQLite 持久、选择旧项目恢复、Cmd-S/Undo/版本冲突有自动测试。 |
@@ -23,6 +23,6 @@
 - 串行完整 Swift Testing 在正常本机权限下新鲜执行：188 项通过，1 项系统原生面板测试按设计跳过。新增的导入取消保持预览测试另有单独红/绿验证；该单元测试使用可控选择结果，不能替代真实 `NSOpenPanel` 点击。
 - `scripts/test-build-dmg.sh`：先因缺少打包脚本失败，再在补齐脚本后于本机正常权限通过。沙盒权限下 `hdiutil create` 返回 `Device not configured`，系统磁盘映像服务需要本机权限。
 - `scripts/verify-dmg-install.sh`：映像校验通过，挂载与复制到明确临时 Applications 路径，严格验签后第一次/第二次隔离原生窗口启动均退出 0；第二次重开同一合成 SQLite，项目计数 7→14。首次构造验收脚本时，固定合成请求 ID 导致重启种子数据冲突；改为每次唯一 ID 后复测通过。未改系统 `/Applications`。
-- `scripts/test-capture-sizes.sh`：先因缺少 1400/1600 截图失败，增加四尺寸自截后通过。主要页面及导入 sheet 的浅/深 PNG 在 `docs/qa/task10/`；设置是独立 780×590 内容窗口，因此其不同轮次截图实际尺寸以对应 `settings-window-checks.txt` 为准。
+- `scripts/test-capture-sizes.sh`：先因缺少 1400/1600 截图失败，增加四尺寸自截后通过。主要页面及导入 sheet 的浅/深 PNG 在 `docs/qa/task10/`；设置是独立窗口，当前截图外框为 780×618，因此其不同轮次截图实际尺寸以对应 `settings-window-checks.txt` 为准。
 - 导入选择框的 `NativeImportDialogQA` 真实 `NSOpenPanel.runModal` 探针两次触发 70 秒看门狗，未取得点击通过证据。实际键盘验证包括原生音色裁剪滑块的右方向键、编辑器原生 Undo 与 Cmd-S 草稿保存自动测试；全界面 Tab 顺序、实体 VoiceOver 朗读、所有 Finder/菜单点击、真人听感、真实百炼 POST 尚未完成，这些项目不得标记为通过。
 - 代码签名 `codesign -dv` 显示 `Signature=adhoc`、`TeamIdentifier=not set`；`security find-identity -v -p codesigning` 为 0。`spctl` 在当前环境报 `internal error in Code Signing subsystem`，不能据此宣称 Gatekeeper 公共分发通过。

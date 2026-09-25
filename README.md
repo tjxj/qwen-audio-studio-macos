@@ -7,7 +7,7 @@
 ## 安装与准备
 
 - 支持 macOS 14 或更新版本、Apple Silicon。首版尚未验证 Intel Mac。
-- 从 `dist/Qwen Audio Studio-macOS14-AppleSilicon.dmg` 安装：打开映像，将应用拖到“Applications”。本地版本使用 ad-hoc 签名，尚无 Developer ID 公证，供当前机器本机验收；面向其他用户分发前须另行签名、公证和贴票。
+- 从发布页的 DMG（本地构建路径为 `dist/Qwen Audio Studio-macOS14-AppleSilicon.dmg`）安装：打开映像，将应用拖到“Applications”。本地版本使用 ad-hoc 签名，尚无 Developer ID 公证，供当前机器本机验收；面向其他用户分发前须另行签名、公证和贴票。iCloud 同步目录中的 `dist/Qwen Audio Studio.app` 可能被系统重新附加扩展属性，最终交付与严格签名校验以 DMG 内应用为准。
 - 在百炼北京地域准备具有 Next 音频服务权限的 [API Key](https://help.aliyun.com/zh/model-studio/get-api-key) 和 [Workspace ID](https://help.aliyun.com/zh/model-studio/obtain-the-app-id-and-workspace-id)。两者在“设置”中分别保存到本机 Keychain；保存后不会向界面回填 API Key。请勿把它们写入脚本、截图或提交到 Git。
 - 首次使用，在“设置 → 文件与存储”选择输出文件夹并允许访问。应用会记住安全作用域授权；目录搬迁、磁盘断开或权限失效时，可在原处重新授权。点击 Finder 按钮可定位已登记的目录或作品。
 
