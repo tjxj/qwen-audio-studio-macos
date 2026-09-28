@@ -6,6 +6,8 @@
     <key>CFBundleDisplayName</key><string>Qwen Audio Studio</string>
     <key>CFBundleExecutable</key><string>QwenAudioStudioMacApp</string>
     <key>CFBundleIdentifier</key><string>studio.qwen.audio.mac</string>
+    <key>CFBundleIconFile</key><string>AppIcon</string>
+    <key>CFBundleIconName</key><string>AppIcon</string>
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
     <key>CFBundleName</key><string>Qwen Audio Studio</string>
     <key>CFBundlePackageType</key><string>APPL</string>

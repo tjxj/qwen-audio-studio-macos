@@ -1,8 +1,23 @@
-# Qwen Audio Studio for Mac
+<div align="center">
+  <img src="Resources/AppIcon.png" width="128" height="128" alt="Qwen Audio Studio Icon" />
+  <h1>Qwen Audio Studio for Mac</h1>
+  <p><b>让灵感，被听见</b></p>
+  <p>面向 <code>qwen-audio-3.1-tts-next</code> 的 macOS 原生全景声音频创作台与 AI 剧本工坊</p>
+</div>
 
-面向 `qwen-audio-3.1-tts-next` 的 macOS 原生音频创作台。界面采用 SwiftUI/AppKit 开发，支持本地 SQLite 保存草稿、作品、音色与任务。运行时无需浏览器、本地 Web 服务、Python、Node 或 ffmpeg；调用阿里云百炼生成音频时需要联网，且按服务规则收费。
+---
 
-![浅色创作台](docs/qa/task10/creation-light-1280.png)
+## 界面预览
+
+### 1. AI 编剧（对话式全景声剧本工坊）
+> 内置全景声剧本方法论，支持接入任意兼容 OpenAI 规范的大模型，快速构思多角色台词、情绪与音效标签，并一键导入创作台二次微调。
+
+![AI 编剧](docs/screenshots/ai-scriptwriter.png)
+
+### 2. 原生创作台（多模式声学合成与二次微调）
+> 提供 7 种专业场景模式，支持多角色音色分配、情绪与动作指令嵌入、音效提示词与声学环境描述，提交前具备计费预检与确认。
+
+![原生创作台](docs/screenshots/studio-creation.png)
 
 ---
 
