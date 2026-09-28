@@ -66,78 +66,103 @@ struct SettingsScreen: View {
                 .background(StudioPalette.surface, in: RoundedRectangle(cornerRadius: 13))
                 .overlay(RoundedRectangle(cornerRadius: 13).stroke(StudioPalette.stroke))
 
-                VStack(alignment: .leading, spacing: 12) {
-                    VStack(alignment: .leading, spacing: 9) {
-                        Label("文件与存储", systemImage: "folder").font(.headline)
-                        Text(outputFolders.defaultName).font(.caption).lineLimit(1)
-                        HStack(spacing: 8) {
-                            Button("选择文件夹…") { Task { await outputFolders.chooseDefault() } }
-                                .disabled(outputFolders.directories == nil || outputFolders.isChoosing)
-                            if let id = outputFolders.defaultID {
-                                Button("重新授权") { Task { _ = await outputFolders.reauthorize(id) } }
-                                    .disabled(outputFolders.isChoosing)
-                                Button("Finder") { Task { await outputFolders.revealDirectory(id) } }
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 12) {
+                        VStack(alignment: .leading, spacing: 9) {
+                            Label("文件与存储", systemImage: "folder").font(.headline)
+                            Text(outputFolders.defaultName).font(.caption).lineLimit(1)
+                            HStack(spacing: 8) {
+                                Button("选择文件夹…") { Task { await outputFolders.chooseDefault() } }
+                                    .disabled(outputFolders.directories == nil || outputFolders.isChoosing)
+                                if let id = outputFolders.defaultID {
+                                    Button("重新授权") { Task { _ = await outputFolders.reauthorize(id) } }
+                                        .disabled(outputFolders.isChoosing)
+                                    Button("Finder") { Task { await outputFolders.revealDirectory(id) } }
+                                }
                             }
-                        }
-                        if let message = outputFolders.errorMessage { Text(message).foregroundStyle(.red).font(.caption) }
-                        Divider()
-                        Text("应用数据 \(ByteCountFormatter.string(fromByteCount: localStorageBytes, countStyle: .file))")
-                            .font(.caption).foregroundStyle(.secondary)
-                        Text("已登记生成文件 \(ByteCountFormatter.string(fromByteCount: generatedStorageBytes, countStyle: .file)) · \(localRecordCount) 条记录")
-                            .font(.caption).foregroundStyle(.secondary)
-                        if unavailableGeneratedFiles > 0 {
-                            Text("\(unavailableGeneratedFiles) 个文件暂不可统计，请检查输出目录授权。")
-                                .font(.caption).foregroundStyle(.orange)
-                        }
-                        Button("检查本地环境") { Task { await checkEnvironment() } }
-                        Text(environmentStatus).font(.caption).foregroundStyle(.secondary).lineLimit(2)
-                        if state != nil {
-                            Button("导入旧版作品…") { showingLegacyImport = true }
-                                .font(.caption)
-                        }
-                    }.card()
+                            if let message = outputFolders.errorMessage { Text(message).foregroundStyle(.red).font(.caption) }
+                            Divider()
+                            Text("应用数据 \(ByteCountFormatter.string(fromByteCount: localStorageBytes, countStyle: .file))")
+                                .font(.caption).foregroundStyle(.secondary)
+                            Text("已登记生成文件 \(ByteCountFormatter.string(fromByteCount: generatedStorageBytes, countStyle: .file)) · \(localRecordCount) 条记录")
+                                .font(.caption).foregroundStyle(.secondary)
+                            if unavailableGeneratedFiles > 0 {
+                                Text("\(unavailableGeneratedFiles) 个文件暂不可统计，请检查输出目录授权。")
+                                    .font(.caption).foregroundStyle(.orange)
+                            }
+                            Button("检查本地环境") { Task { await checkEnvironment() } }
+                            Text(environmentStatus).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                            if state != nil {
+                                Button("导入旧版作品…") { showingLegacyImport = true }
+                                    .font(.caption)
+                            }
+                        }.card()
 
-                    VStack(alignment: .leading, spacing: 8) {
-                        Label("新作品默认值", systemImage: "slider.horizontal.3").font(.headline)
-                        HStack {
-                            Picker("格式", selection: $preferences.defaultFormat) {
-                                Text("WAV").tag("wav"); Text("MP3").tag("mp3"); Text("PCM").tag("pcm")
+                        VStack(alignment: .leading, spacing: 8) {
+                            Label("AI 脚本模型 (OpenAI 兼容)", systemImage: "sparkles").font(.headline)
+                            Text("用于「AI 编剧」对话生成剧本，支持所有兼容 OpenAI 格式的模型。")
+                                .font(.caption).foregroundStyle(.secondary)
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("API Base URL").font(.caption2).foregroundStyle(.secondary)
+                                TextField("https://api.deepseek.com/v1", text: $preferences.chatAPIBaseURL)
+                                    .textFieldStyle(.roundedBorder)
                             }
-                            Picker("采样率", selection: $preferences.defaultSampleRate) {
-                                ForEach([8000, 16000, 24000, 44100, 48000], id: \.self) { Text("\($0) Hz").tag($0) }
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("API Key").font(.caption2).foregroundStyle(.secondary)
+                                SecureField("输入模型 API Key", text: $preferences.chatAPIKey)
+                                    .textFieldStyle(.roundedBorder)
                             }
-                        }
-                        Picker("候选数", selection: $preferences.defaultCandidates) {
-                            ForEach(1...3, id: \.self) { Text("\($0) 个").tag($0) }
-                        }
-                        Picker("同时生成", selection: $preferences.defaultConcurrency) {
-                            ForEach(1...3, id: \.self) { Text("\($0) 路").tag($0) }
-                        }
-                        Text("只影响新草稿；生成前会确认实际调用次数。")
-                            .font(.caption).foregroundStyle(.secondary)
-                    }.card()
+                            VStack(alignment: .leading, spacing: 4) {
+                                Text("模型名称").font(.caption2).foregroundStyle(.secondary)
+                                TextField("deepseek-v4.1-flash", text: $preferences.chatModelName)
+                                    .textFieldStyle(.roundedBorder)
+                            }
+                        }.card()
 
-                    VStack(alignment: .leading, spacing: 8) {
-                        Label("外观与阅读", systemImage: "paintbrush").font(.headline)
-                        HStack {
-                            Picker("主题", selection: $preferences.appearance) {
-                                ForEach(StudioAppearance.allCases) { Text($0.title).tag($0) }
+                        VStack(alignment: .leading, spacing: 8) {
+                            Label("新作品默认值", systemImage: "slider.horizontal.3").font(.headline)
+                            HStack {
+                                Picker("格式", selection: $preferences.defaultFormat) {
+                                    Text("WAV").tag("wav"); Text("MP3").tag("mp3"); Text("PCM").tag("pcm")
+                                }
+                                Picker("采样率", selection: $preferences.defaultSampleRate) {
+                                    ForEach([8000, 16000, 24000, 44100, 48000], id: \.self) { Text("\($0) Hz").tag($0) }
+                                }
                             }
-                            Picker("字体", selection: $preferences.scriptFont) {
-                                ForEach(ScriptFont.allCases) { Text($0.title).tag($0) }
+                            Picker("候选数", selection: $preferences.defaultCandidates) {
+                                ForEach(1...3, id: \.self) { Text("\($0) 个").tag($0) }
                             }
-                        }
-                        Slider(value: $preferences.scriptSize, in: 14...26, step: 1) {
-                            Text("脚本字号 \(Int(preferences.scriptSize))")
-                        }
-                    }.card()
-                }.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                            Picker("同时生成", selection: $preferences.defaultConcurrency) {
+                                ForEach(1...3, id: \.self) { Text("\($0) 路").tag($0) }
+                            }
+                            Text("只影响新草稿；生成前会确认实际调用次数。")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }.card()
+
+                        VStack(alignment: .leading, spacing: 8) {
+                            Label("外观与阅读", systemImage: "paintbrush").font(.headline)
+                            HStack {
+                                Picker("主题", selection: $preferences.appearance) {
+                                    ForEach(StudioAppearance.allCases) { Text($0.title).tag($0) }
+                                }
+                                Picker("字体", selection: $preferences.scriptFont) {
+                                    ForEach(ScriptFont.allCases) { Text($0.title).tag($0) }
+                                }
+                            }
+                            Slider(value: $preferences.scriptSize, in: 12...28, step: 1) {
+                                Text("脚本字号 \(Int(preferences.scriptSize))")
+                            }
+                        }.card()
+                    }
+                    .padding(.trailing, 4)
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             }.frame(maxHeight: .infinity)
             Text("环境检查只读取本机状态，不会发送收费模型请求。")
                 .font(.caption).foregroundStyle(.secondary)
         }
         .padding(20)
-        .frame(width: 780, height: 590)
+        .frame(width: 800, height: 620)
         .background(StudioPalette.background)
         .onAppear { if qaMode { credentialStatus = "演示模式：未读取钥匙串" } else { refreshCredentialStatus() } }
         .sheet(isPresented: $showingLegacyImport) { if let state { ImportSheet(state: state) } }

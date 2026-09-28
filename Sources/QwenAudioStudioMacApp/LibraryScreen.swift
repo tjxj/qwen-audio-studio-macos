@@ -258,7 +258,12 @@ struct LibraryScreen: View {
                 }.buttonStyle(.borderless)
                 Divider()
                 HStack {
-                    Button("试听 / A-B") { Task { await showResult(item.job.batchID) } }.disabled(!audioReady)
+                    Button { Task { await showResult(item.job.batchID) } } label: {
+                        Label("试听 / A-B", systemImage: "waveform")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(accent)
+                    .disabled(!audioReady)
                     Button("下载") { Task { await download(item.job.id) } }.disabled(!audioReady)
                     Button("Finder") { Task { await reveal(item.job.id) } }.disabled(!audioReady)
                 }.buttonStyle(.bordered)

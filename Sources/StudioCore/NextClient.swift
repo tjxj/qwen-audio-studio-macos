@@ -1,12 +1,13 @@
 import Foundation
 
 public enum NextClientError: Error, LocalizedError, Sendable {
-    case invalidRequest, transport, httpStatus(Int), invalidResponse, expiredDownload, downloadFailed
+    case invalidRequest, transport, httpStatus(Int), invalidResponse, expiredDownload, downloadFailed, serverError(code: Int, message: String)
     public var errorDescription: String? {
         switch self {
         case .invalidRequest: "生成参数无效，请检查后重试。"
         case .transport: "网络请求结果未能确认，请在记录中核查。"
         case .httpStatus(let code): "服务返回 HTTP \(code)；请求结果请在记录中核查。"
+        case .serverError(let code, let message): "百炼服务报错 (HTTP \(code))：\(message)"
         case .invalidResponse: "服务响应不完整；请求结果请在记录中核查。"
         case .expiredDownload: "下载链接已过期。"
         case .downloadFailed: "音频下载失败，可单独重试下载。"
@@ -68,12 +69,19 @@ public struct NextClient: SynthesizerClient {
         do { (data, response) = try await session.data(for: urlRequest) }
         catch { throw NextClientError.transport }
         guard let http = response as? HTTPURLResponse, http.url?.host == endpoint.host else { throw NextClientError.invalidResponse }
-        guard http.statusCode == 200 else { throw NextClientError.httpStatus(http.statusCode) }
+        if http.statusCode != 200 {
+            if let parsedErr = try? JSONDecoder().decode(ServerErrorResponse.self, from: data),
+               let msg = parsedErr.message, !msg.isEmpty {
+                throw NextClientError.serverError(code: http.statusCode, message: msg)
+            }
+            throw NextClientError.httpStatus(http.statusCode)
+        }
         guard let parsed = try? JSONDecoder().decode(Response.self, from: data),
               !parsed.requestID.isEmpty, parsed.requestID.utf8.count <= 128,
               parsed.requestID.utf8.allSatisfy({ (65...90).contains($0) || (97...122).contains($0) || (48...57).contains($0) || $0 == 45 || $0 == 95 }),
               let audioURL = URL(string: parsed.output.audio.url),
-              audioURL.scheme?.lowercased() == "https", audioURL.host?.isEmpty == false,
+              let scheme = audioURL.scheme?.lowercased(), (scheme == "https" || scheme == "http"),
+              audioURL.host?.isEmpty == false,
               parsed.output.audio.expiresAt > Date().timeIntervalSince1970 else { throw NextClientError.invalidResponse }
         return ProviderOutput(receipt: ProviderResponseSnapshot(providerRequestID: parsed.requestID,
             audioURL: audioURL, expiresAt: Date(timeIntervalSince1970: parsed.output.audio.expiresAt)))
@@ -106,6 +114,10 @@ public struct NextClient: SynthesizerClient {
         enum CodingKeys: String, CodingKey { case requestID = "request_id", output }
         struct Output: Decodable { let audio: Audio }
         struct Audio: Decodable { let url: String; let expiresAt: Double; enum CodingKeys: String, CodingKey { case url, expiresAt = "expires_at" } }
+    }
+    private struct ServerErrorResponse: Decodable {
+        let code: String?
+        let message: String?
     }
 }
 

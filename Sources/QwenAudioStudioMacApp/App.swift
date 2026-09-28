@@ -228,7 +228,8 @@ struct QwenAudioStudioMacApp: App {
         let prefix = ProcessInfo.processInfo.arguments.contains("--capture-page=import") ? "import" :
             ProcessInfo.processInfo.arguments.contains("--capture-page=templates") ? "templates" :
             ProcessInfo.processInfo.arguments.contains("--capture-page=library") ? "library" :
-            ProcessInfo.processInfo.arguments.contains("--capture-page=settings") ? "settings" : "creation"
+            ProcessInfo.processInfo.arguments.contains("--capture-page=settings") ? "settings" :
+            ProcessInfo.processInfo.arguments.contains("--capture-page=chat") ? "chat" : "creation"
         if prefix == "settings" { window.toolbar = nil; window.title = "设置" }
         var checks: [String] = []
         checks.append("data=public templates and synthetic draft; CapturePreferenceStore; temporary isolated root when --capture-task9-root is supplied; no network or user files")

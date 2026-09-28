@@ -56,7 +56,7 @@ struct PromptEditor: NSViewRepresentable {
         editor.autoresizingMask = [.width]
         editor.textContainer?.widthTracksTextView = true
         editor.textContainer?.containerSize = NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude)
-        editor.textContainerInset = NSSize(width: 14, height: 14)
+        editor.textContainerInset = NSSize(width: 18, height: 16)
         editor.minSize = .zero
         editor.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         editor.drawsBackground = false
@@ -92,7 +92,7 @@ struct PromptEditor: NSViewRepresentable {
         editor.textColor = .labelColor
         editor.insertionPointColor = .labelColor
         let paragraph = NSMutableParagraphStyle()
-        paragraph.lineSpacing = 7
+        paragraph.lineSpacing = max(6, font.pointSize * 0.35)
         editor.defaultParagraphStyle = paragraph
         editor.typingAttributes = [.font: font, .foregroundColor: NSColor.labelColor, .paragraphStyle: paragraph]
         editor.textStorage?.addAttributes([.paragraphStyle: paragraph], range: NSRange(location: 0, length: (editor.string as NSString).length))

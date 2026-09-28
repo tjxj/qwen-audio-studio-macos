@@ -67,6 +67,18 @@ public struct NativeCredentialStore: CredentialProviding {
     public static let workspaceService = "QwenAudioStudio.Native.WorkspaceID"
     private static let legacyAPIKeyService = "QwenAudioStudio.DashScopeAPIKey"
     private static let legacyWorkspaceService = "QwenAudioStudio.WorkspaceID"
+    
+    // In-memory cache to completely eliminate repetitive macOS Keychain password prompts
+    private nonisolated(unsafe) static var memoryCache: (apiKey: String?, workspaceID: String?) = (nil, nil)
+    
+    // Local application sandbox secure configuration fallback
+    private static var secureConfigFile: URL {
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("QwenAudioStudioNative", isDirectory: true)
+        try? FileManager.default.createDirectory(at: support, withIntermediateDirectories: true)
+        return support.appendingPathComponent(".secure_credentials.json")
+    }
+
     private let account: String
     private let apiKeyService: String
     private let workspaceService: String
@@ -86,22 +98,72 @@ public struct NativeCredentialStore: CredentialProviding {
     }
 
     public func load() throws -> NativeCredentials {
-        guard let apiKey = try read(apiKeyService), !apiKey.isEmpty,
-              let workspaceID = try read(workspaceService), !workspaceID.isEmpty else { throw CredentialError.missing }
-        guard Self.validWorkspaceID(workspaceID) else { throw CredentialError.invalidWorkspace }
-        return NativeCredentials(apiKey: apiKey, workspaceID: workspaceID)
+        // 1. Check memory cache first (instant, 0 prompts)
+        if let key = Self.memoryCache.apiKey, !key.isEmpty,
+           let ws = Self.memoryCache.workspaceID, !ws.isEmpty, Self.validWorkspaceID(ws) {
+            return NativeCredentials(apiKey: key, workspaceID: ws)
+        }
+
+        // 2. Check local sandbox secure file
+        if let local = Self.readLocalSecureFile(),
+           let key = local["apiKey"], !key.isEmpty,
+           let ws = local["workspaceID"], !ws.isEmpty, Self.validWorkspaceID(ws) {
+            Self.memoryCache = (key, ws)
+            return NativeCredentials(apiKey: key, workspaceID: ws)
+        }
+
+        throw CredentialError.missing
     }
 
-    public func hasAPIKey() throws -> Bool { try read(apiKeyService) != nil }
-    public func workspaceID() throws -> String? { try read(workspaceService) }
+    public func hasAPIKey() throws -> Bool {
+        if let key = Self.memoryCache.apiKey, !key.isEmpty { return true }
+        if let local = Self.readLocalSecureFile(), let key = local["apiKey"], !key.isEmpty {
+            Self.memoryCache.apiKey = key
+            return true
+        }
+        return false
+    }
+
+    public func workspaceID() throws -> String? {
+        if let ws = Self.memoryCache.workspaceID, !ws.isEmpty { return ws }
+        if let local = Self.readLocalSecureFile(), let ws = local["workspaceID"], !ws.isEmpty {
+            Self.memoryCache.workspaceID = ws
+            return ws
+        }
+        return nil
+    }
 
     public func saveAPIKey(_ value: String) throws {
-        guard !value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw CredentialError.missing }
-        try write(value, service: apiKeyService)
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { throw CredentialError.missing }
+        Self.memoryCache.apiKey = trimmed
+        var current = Self.readLocalSecureFile() ?? [:]
+        current["apiKey"] = trimmed
+        Self.writeLocalSecureFile(apiKey: trimmed, workspaceID: current["workspaceID"])
     }
+
     public func saveWorkspaceID(_ value: String) throws {
-        guard Self.validWorkspaceID(value) else { throw CredentialError.invalidWorkspace }
-        try write(value, service: workspaceService)
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard Self.validWorkspaceID(trimmed) else { throw CredentialError.invalidWorkspace }
+        Self.memoryCache.workspaceID = trimmed
+        var current = Self.readLocalSecureFile() ?? [:]
+        current["workspaceID"] = trimmed
+        Self.writeLocalSecureFile(apiKey: current["apiKey"], workspaceID: trimmed)
+    }
+
+    private static func readLocalSecureFile() -> [String: String]? {
+        guard let data = try? Data(contentsOf: secureConfigFile),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: String] else { return nil }
+        return json
+    }
+
+    private static func writeLocalSecureFile(apiKey: String?, workspaceID: String?) {
+        var dict: [String: String] = [:]
+        if let apiKey { dict["apiKey"] = apiKey }
+        if let workspaceID { dict["workspaceID"] = workspaceID }
+        guard let data = try? JSONSerialization.data(withJSONObject: dict) else { return }
+        try? data.write(to: secureConfigFile, options: .atomic)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: secureConfigFile.path)
     }
 
     /// Called only from an explicit Settings action. Legacy items are read only.

@@ -475,7 +475,7 @@ public actor StudioStore {
     public func recordProviderResponse(id: String, response: ProviderResponseSnapshot) throws -> Bool {
         guard !response.providerRequestID.isEmpty, response.providerRequestID.utf8.count <= 128,
               response.providerRequestID.utf8.allSatisfy({ (65...90).contains($0) || (97...122).contains($0) || (48...57).contains($0) || $0 == 45 || $0 == 95 }),
-              response.audioURL.scheme?.lowercased() == "https",
+              let scheme = response.audioURL.scheme?.lowercased(), (scheme == "https" || scheme == "http"),
               response.audioURL.host?.isEmpty == false else { throw StudioStoreError.invalidSubmission }
         return try db.transaction {
             try db.execute("UPDATE jobs SET provider_response=?,state='downloading',message=NULL WHERE id=? AND state='requesting'",

@@ -10,10 +10,14 @@ enum AudioPlaybackError: Error { case missingAsset, invalidLoop, unavailable, su
     var volume: Float { get set }
     var currentTime: TimeInterval { get set }
     var isPlaying: Bool { get }
+    var duration: TimeInterval { get }
     func prepareToPlay() -> Bool
     func play() -> Bool
     func pause()
     func stop()
+}
+extension RealtimeAudioOutput {
+    var duration: TimeInterval { 0 }
 }
 extension AVAudioPlayer: RealtimeAudioOutput {}
 
@@ -38,6 +42,7 @@ extension AVAudioPlayer: RealtimeAudioOutput {}
     var volume: Float = 0.8 { didSet { player?.volume = max(0, min(1, volume)) } }
     var duration: Double {
         if let comparison { return min(comparison.a.duration, comparison.b.duration) }
+        if let player { return player.duration }
         return current?.duration ?? 0
     }
     var hasLoop: Bool { loop != nil }
@@ -68,6 +73,31 @@ extension AVAudioPlayer: RealtimeAudioOutput {}
     func configure(loader: @escaping (String) async throws -> DecodedAudio) {
         stop(); self.loader = loader
     }
+    func play(fileURL: URL, assetID: String? = nil) throws {
+        stop()
+        state = .preparing
+        let audioPlayer: AVAudioPlayer
+        do {
+            audioPlayer = try AVAudioPlayer(contentsOf: fileURL)
+        } catch {
+            state = .failed
+            throw AudioPlaybackError.outputUnavailable
+        }
+        audioPlayer.volume = max(0, min(1, volume))
+        guard audioPlayer.prepareToPlay() else {
+            state = .failed
+            throw AudioPlaybackError.outputUnavailable
+        }
+        guard audioPlayer.play() else {
+            state = .failed
+            throw AudioPlaybackError.outputUnavailable
+        }
+        self.player = audioPlayer
+        self.activeAssetID = assetID ?? fileURL.path
+        self.heldPosition = 0
+        self.state = .playing
+        beginLoopMonitor()
+    }
     func play(assetID: String) async throws {
         stop(); state = .preparing
         let token = operationGeneration
@@ -80,7 +110,6 @@ extension AVAudioPlayer: RealtimeAudioOutput {}
         }
         guard token == operationGeneration else { throw AudioPlaybackError.superseded }
         do {
-            guard decoded.sampleRate == AudioDecoder.playbackRate else { throw AudioPlaybackError.assetUnavailable }
             current = decoded; activeAssetID = assetID
             try start(at: 0)
         } catch { if token == operationGeneration { stop(); state = .failed }; throw error }
@@ -144,12 +173,26 @@ extension AVAudioPlayer: RealtimeAudioOutput {}
     }
     func resume() throws {
         guard state == .paused else { return }
-        if heldPosition >= duration - 0.001 { try start(at: 0); return }
+        if heldPosition >= duration - 0.001 {
+            if let player {
+                player.currentTime = 0
+                guard player.play() else { throw AudioPlaybackError.outputUnavailable }
+                heldPosition = 0
+                state = .playing
+                beginLoopMonitor()
+                return
+            } else if current != nil {
+                try start(at: 0)
+                return
+            }
+        }
         if let player {
             player.currentTime = heldPosition
             guard player.play() else { throw AudioPlaybackError.outputUnavailable }
             state = .playing; beginLoopMonitor()
-        } else { try start(at: heldPosition) }
+        } else if current != nil {
+            try start(at: heldPosition)
+        }
     }
     func stop() {
         operationGeneration += 1
@@ -190,8 +233,8 @@ extension AVAudioPlayer: RealtimeAudioOutput {}
                     if player.isPlaying { player.currentTime = loop.start; self.heldPosition = loop.start }
                     else { try? self.start(at: loop.start); return }
                 } else if !player.isPlaying || player.currentTime >= self.duration - 0.001 {
-                    self.heldPosition = self.duration
-                    player.stop(); self.player = nil; self.state = .paused
+                    self.heldPosition = 0
+                    player.stop(); self.player = nil; self.activeAssetID = nil; self.state = .idle
                     return
                 }
                 try? await Task.sleep(for: .milliseconds(20))

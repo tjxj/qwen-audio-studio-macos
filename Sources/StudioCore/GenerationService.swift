@@ -73,7 +73,7 @@ public struct NextAudioDownloader: AudioDownloading {
     }
     public func download(_ receipt: ProviderResponseSnapshot) async throws -> Data {
         guard receipt.expiresAt > Date() else { throw NextClientError.expiredDownload }
-        guard receipt.audioURL.scheme?.lowercased() == "https" else { throw NextClientError.downloadFailed }
+        guard let scheme = receipt.audioURL.scheme?.lowercased(), (scheme == "https" || scheme == "http") else { throw NextClientError.downloadFailed }
         var request = URLRequest(url: receipt.audioURL)
         request.httpMethod = "GET"
         request.timeoutInterval = 60
@@ -94,7 +94,7 @@ public struct NextAudioDownloader: AudioDownloading {
 final class SecureDownloadRedirects: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
-        guard request.url?.scheme?.lowercased() == "https", request.httpMethod == "GET",
+        guard let scheme = request.url?.scheme?.lowercased(), (scheme == "https" || scheme == "http"), request.httpMethod == "GET",
               task.originalRequest?.httpMethod == "GET" else {
             completionHandler(nil)
             return
@@ -406,13 +406,15 @@ public actor GenerationService {
             let output: ProviderOutput
             do { output = try await synthesizer.synthesize(request) }
             catch {
-                _ = try? await store.markResultUncertain(id: jobID, message: "付费请求结果待核查；不会自动重发。")
+                let detail = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                _ = try? await store.markResultUncertain(id: jobID, message: "生成请求失败：\(detail)")
                 return
             }
             guard try await store.recordProviderResponse(id: jobID, response: output.receipt) else { return }
             await finishDownload(jobID: jobID, receipt: output.receipt, submission: batch, lease: lease)
         } catch {
-            _ = try? await store.markResultUncertain(id: jobID, message: "付费请求结果待核查；不会自动重发。")
+            let detail = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+            _ = try? await store.markResultUncertain(id: jobID, message: "生成过程异常：\(detail)")
         }
     }
 

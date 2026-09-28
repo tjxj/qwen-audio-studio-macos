@@ -2,11 +2,11 @@ import SwiftUI
 import StudioCore
 
 enum StudioPalette {
-    static let green = Color(red: 0.10, green: 0.38, blue: 0.33)
-    static let greenSoft = Color(red: 0.89, green: 0.95, blue: 0.93)
+    static let green = Color(red: 0.02, green: 0.59, blue: 0.41)
+    static let greenSoft = Color(red: 0.92, green: 0.98, blue: 0.95)
     static let background = Color(nsColor: .windowBackgroundColor)
     static let surface = Color(nsColor: .controlBackgroundColor)
-    static let stroke = Color(nsColor: .separatorColor).opacity(0.65)
+    static let stroke = Color(nsColor: .separatorColor).opacity(0.45)
     static let muted = Color.secondary
 }
 
@@ -16,31 +16,28 @@ enum StudioTypography {
     }
 }
 
-private enum StudioPage: String, CaseIterable, Identifiable {
-    case creation = "创作台"
-    case library = "作品库"
-    case templates = "灵感模板"
-
-    var id: String { rawValue }
-    var symbol: String {
-        switch self {
-        case .creation: "waveform"
-        case .library: "square.stack"
-        case .templates: "lightbulb"
-        }
-    }
-}
-
 struct AppShell: View {
     let appState: AppState?
     @State private var draft: DraftController
     @State private var templateApplication: TemplateApplicationController
     @State private var templateLibrary = TemplateLibraryController()
     @State private var promptEditor = PromptEditorHandle()
-    @State private var selection: StudioPage? = ProcessInfo.processInfo.arguments.contains("--capture-page=templates") ? .templates :
-        ProcessInfo.processInfo.arguments.contains("--capture-page=library") ? .library : .creation
+    @State private var localSelection: StudioPage = ProcessInfo.processInfo.arguments.contains("--capture-page=chat") ? .chat :
+        (ProcessInfo.processInfo.arguments.contains("--capture-page=templates") ? .templates :
+        (ProcessInfo.processInfo.arguments.contains("--capture-page=library") ? .library : .creation))
     @Environment(\.openSettings) private var openSettings
     @Environment(\.colorScheme) private var colorScheme
+
+    private var currentSelection: StudioPage {
+        get { appState?.selectedPage ?? localSelection }
+        nonmutating set {
+            if let appState {
+                appState.selectedPage = newValue
+            } else {
+                localSelection = newValue
+            }
+        }
+    }
 
     init(appState: AppState? = nil, qaMode: Bool = false) {
         self.appState = appState
@@ -60,64 +57,77 @@ struct AppShell: View {
             VStack(spacing: 0) {
                 brand
                     .padding(.horizontal, 18)
-                    .padding(.top, 26)
-                    .padding(.bottom, 27)
+                    .padding(.top, 24)
+                    .padding(.bottom, 22)
 
                 VStack(spacing: 5) {
                     ForEach(StudioPage.allCases) { page in
                         Button {
-                            selection = page
+                            currentSelection = page
                         } label: {
                             Label(page.rawValue, systemImage: page.symbol)
                                 .font(.system(size: 13, weight: .semibold))
-                                .foregroundStyle(selection == page
+                                .foregroundStyle(currentSelection == page
                                                  ? (colorScheme == .dark
                                                     ? Color(red: 0.54, green: 0.78, blue: 0.69)
                                                     : StudioPalette.green)
                                                  : .primary)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .padding(.horizontal, 13)
-                                .frame(height: 42)
-                                .background(selection == page ? StudioPalette.green.opacity(0.12) : .clear,
+                                .frame(height: 40)
+                                .background(currentSelection == page ? StudioPalette.green.opacity(0.12) : .clear,
                                             in: RoundedRectangle(cornerRadius: 8))
                         }
                         .buttonStyle(.plain)
-                        .accessibilityAddTraits(selection == page ? [.isSelected] : [])
+                        .accessibilityAddTraits(currentSelection == page ? [.isSelected] : [])
                     }
                 }
                 .padding(.horizontal, 11)
 
                 Spacer(minLength: 8)
 
-                VStack(alignment: .leading, spacing: 4) {
-                    Button {
-                        openSettings()
-                    } label: {
-                        Label("设置", systemImage: "gearshape")
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    .buttonStyle(.plain)
-                    .padding(10)
-
-                    Text("让灵感，被听见。")
-                        .font(.system(size: 11))
+                Button {
+                    openSettings()
+                } label: {
+                    Label("偏好设置", systemImage: "gearshape")
+                        .font(.system(size: 13))
                         .foregroundStyle(.secondary)
-                        .padding(.horizontal, 10)
-                        .padding(.top, 10)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 13)
+                        .frame(height: 38)
+                        .contentShape(Rectangle())
                 }
-                .padding(.horizontal, 13)
-                .padding(.bottom, 18)
+                .buttonStyle(.plain)
+                .padding(.horizontal, 11)
+                .padding(.bottom, 16)
             }
             .frame(minWidth: 196, idealWidth: 204, maxWidth: 220)
             .background(StudioPalette.surface)
         } detail: {
             Group {
-                switch selection ?? .creation {
-                case .creation: CreationScreen(draft: draft, sharedUndoManager: templateApplication.undoManager, editor: promptEditor, appState: appState)
-                case .library: LibraryScreen(state: appState) { project in
-                    Task { await appState?.openProjectID(project.id); selection = .creation }
-                }
-                case .templates: TemplateScreen(library: templateLibrary, application: templateApplication) { selection = .creation }
+                switch currentSelection {
+                case .chat:
+                    ChatScreen(
+                        onImportToCreation: { title, mode, scriptText in
+                            draft.change { fields in
+                                fields.name = title
+                                fields.mode = mode
+                                fields.prompt = scriptText
+                            }
+                            currentSelection = .creation
+                        },
+                        onOpenSettings: {
+                            openSettings()
+                        }
+                    )
+                case .creation:
+                    CreationScreen(draft: draft, sharedUndoManager: templateApplication.undoManager, editor: promptEditor, appState: appState)
+                case .library:
+                    LibraryScreen(state: appState) { project in
+                        Task { await appState?.openProjectID(project.id); currentSelection = .creation }
+                    }
+                case .templates:
+                    TemplateScreen(library: templateLibrary, application: templateApplication) { currentSelection = .creation }
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -128,19 +138,28 @@ struct AppShell: View {
     }
 
     private var brand: some View {
-        HStack(alignment: .center, spacing: 12) {
-            Image(systemName: "waveform")
-                .font(.system(size: 21, weight: .medium))
-                .foregroundStyle(StudioPalette.green)
-                .frame(width: 27)
-
-            VStack(alignment: .leading, spacing: 0) {
-                Text("Qwen Audio")
-                Text("Studio")
+        HStack(alignment: .center, spacing: 10) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(StudioPalette.green.gradient)
+                    .frame(width: 32, height: 32)
+                Image(systemName: "waveform")
+                    .font(.system(size: 16, weight: .semibold))
+                    .foregroundStyle(.white)
             }
-            .font(StudioTypography.serif(16))
-            .foregroundStyle(.primary)
-            .lineSpacing(-2)
+
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 4) {
+                    Text("Qwen Audio")
+                        .font(.system(size: 13, weight: .bold))
+                    Text("Studio")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundStyle(.secondary)
+                }
+                Text("让灵感，被听见")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+            }
             .fixedSize(horizontal: true, vertical: false)
         }
         .frame(maxWidth: .infinity, alignment: .leading)

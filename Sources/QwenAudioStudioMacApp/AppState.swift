@@ -1,9 +1,30 @@
 import Foundation
+import AVFoundation
 import Observation
 import StudioCore
 
+enum StudioPage: String, CaseIterable, Identifiable, Sendable {
+    case chat = "AI 编剧"
+    case creation = "创作台"
+    case library = "作品库"
+    case templates = "灵感模板"
+
+    var id: String { rawValue }
+    var symbol: String {
+        switch self {
+        case .chat: "bubble.left.and.text.bubble.right"
+        case .creation: "waveform"
+        case .library: "square.stack"
+        case .templates: "lightbulb"
+        }
+    }
+}
+
 @MainActor @Observable
 final class AppState {
+    var selectedPage: StudioPage = ProcessInfo.processInfo.arguments.contains("--capture-page=chat") ? .chat :
+        (ProcessInfo.processInfo.arguments.contains("--capture-page=templates") ? .templates :
+        (ProcessInfo.processInfo.arguments.contains("--capture-page=library") ? .library : .creation))
     let dataRoot: URL
     let store: StudioStore
     let directories: OutputDirectoryStore
@@ -116,22 +137,82 @@ final class AppState {
         }
     }
 
+    var isShowingGenerationOverlay = false
+    var activeGenerationStage = "准备生成音频…"
+    var generationResults: [GeneratedAudioResult] = []
+    var generationFailedMessage: String?
+    var generationFinished = false
+
     func submit(plan: GenerationPlan, hash: String, requestID: String) {
-        guard !submitting, generationPlan?.confirmationHash == plan.confirmationHash else { return }
-        generationPlan = nil
+        guard !submitting else { return }
         submitting = true
+        generationFinished = false
+        generationResults = []
+        generationFailedMessage = nil
+        activeGenerationStage = "正在向阿里云百炼提交通义全景声模型请求…"
         activeBatchID = nil
         jobStage = [:]
         activeRequestID = requestID
+        isShowingGenerationOverlay = true
+
         Task { await monitorRequest(requestID) }
         Task {
-            defer { submitting = false; activeRequestID = nil }
+            defer {
+                submitting = false
+                activeRequestID = nil
+                generationFinished = true
+            }
             do {
                 let batch = try await generation.submit(plan, confirmedHash: hash, clientRequestID: requestID)
                 activeBatchID = batch.id
                 await refreshJobStages(batch.jobIDs)
+
+                // Query generated audio files
+                var collected: [GeneratedAudioResult] = []
+                for jobID in batch.jobIDs {
+                    if let job = try? await store.getJob(id: jobID), job.state == .success {
+                        let assetsList = (try? await store.listAssets(jobID: jobID)) ?? []
+                        if let audioAsset = assetsList.first(where: { $0.kind == "audio" }) {
+                            if let (lease, url) = try? await assets.resolveRegisteredAsset(audioAsset.id) {
+                                defer { lease.close() }
+                                let duration: Double
+                                if let player = try? AVAudioPlayer(contentsOf: url) {
+                                    duration = player.duration
+                                } else {
+                                    duration = (try? await assets.decodeRegisteredAudio(audioAsset.id).duration) ?? 0
+                                }
+                                collected.append(GeneratedAudioResult(
+                                    id: audioAsset.id,
+                                    jobID: jobID,
+                                    batchID: batch.id,
+                                    fileURL: url,
+                                    assetID: audioAsset.id,
+                                    duration: duration,
+                                    format: plan.submission.project.fields.params.format,
+                                    sampleRate: plan.submission.project.fields.params.sampleRate
+                                ))
+                            }
+                        }
+                    }
+                }
+
+                generationResults = collected
+                if collected.isEmpty {
+                    var failMsg = ""
+                    for jobID in batch.jobIDs {
+                        if let job = try? await store.getJob(id: jobID), let msg = job.message, !msg.isEmpty {
+                            failMsg = msg
+                            break
+                        }
+                    }
+                    generationFailedMessage = failMsg.isEmpty ? "模型请求未成功生成音频文件，请在设置中检查 API Key 或 Workspace ID。" : failMsg
+                } else {
+                    activeGenerationStage = "音频生成完成！"
+                }
             } catch {
-                errorMessage = "生成未完成：\(error.localizedDescription)。请在作品库核查记录，勿直接重复提交。"
+                let msg = (error as? LocalizedError)?.errorDescription ?? error.localizedDescription
+                generationFailedMessage = "生成未完成：\(msg)"
+                errorMessage = generationFailedMessage
             }
         }
     }
@@ -152,9 +233,43 @@ final class AppState {
                           batch.submission.clientRequestID == requestID else { continue }
                     activeBatchID = batch.id
                     jobStage[job.id] = job.state
+                    switch job.state {
+                    case .queued:
+                        activeGenerationStage = "任务已排队，等待模型处理…"
+                    case .preparing:
+                        activeGenerationStage = "正在编译剧本与准备参考音频…"
+                    case .requesting:
+                        activeGenerationStage = "阿里云百炼正在生成全景声音频 (qwen-audio-3.1-tts-next)…"
+                    case .downloading:
+                        activeGenerationStage = "音频已生成，正在高速下载至本地输出目录…"
+                    case .validating:
+                        activeGenerationStage = "正在校验音频采样率与完整性…"
+                    case .success:
+                        activeGenerationStage = "音频已成功写入本地作品库！"
+                    case .failed, .interrupted:
+                        if let msg = job.message { activeGenerationStage = msg }
+                    case .cancelled:
+                        activeGenerationStage = "任务已取消"
+                    }
                 }
             }
             try? await Task.sleep(for: .milliseconds(400))
         }
+    }
+}
+
+public struct GeneratedAudioResult: Identifiable, Sendable {
+    public let id: String
+    public let jobID: String
+    public let batchID: String
+    public let fileURL: URL
+    public let assetID: String
+    public let duration: Double
+    public let format: String
+    public let sampleRate: Int
+
+    public init(id: String, jobID: String, batchID: String, fileURL: URL, assetID: String, duration: Double, format: String, sampleRate: Int) {
+        self.id = id; self.jobID = jobID; self.batchID = batchID; self.fileURL = fileURL
+        self.assetID = assetID; self.duration = duration; self.format = format; self.sampleRate = sampleRate
     }
 }

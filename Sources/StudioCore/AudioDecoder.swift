@@ -37,7 +37,17 @@ public enum AudioDecoder {
         else if data.prefix(4) == Data("OggS".utf8), data.prefix(512).range(of: Data("OpusHead".utf8)) != nil { ext = "ogg" }
         else { throw AudioDecodeError.unsupported }
         if ext == "mp3" { try validateMP3DeclaredLength(data) }
-        let samples = try ext == "wav" ? decodeWAV(data) : (ext == "ogg" ? decodeOpus(data) : decodeNative(data, ext: ext))
+        let samples: [Float]
+        do {
+            samples = try ext == "wav" ? decodeWAV(data) : (ext == "ogg" ? decodeOpus(data) : decodeNative(data, ext: ext))
+        } catch {
+            do {
+                samples = try decodeNative(data, ext: ext)
+            } catch {
+                if let audioError = error as? AudioDecodeError { throw audioError }
+                throw AudioDecodeError.invalidAudio
+            }
+        }
         guard !samples.isEmpty, samples.count <= Int(playbackRate * 60 * 60), samples.allSatisfy(\.isFinite) else { throw AudioDecodeError.invalidAudio }
         return DecodedAudio(samples: samples, sampleRate: playbackRate, contentHash: hash)
     }

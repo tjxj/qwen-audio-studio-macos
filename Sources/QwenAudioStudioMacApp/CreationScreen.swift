@@ -21,22 +21,36 @@ struct CreationScreen: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            header
-            modes
+        VStack(alignment: .leading, spacing: 12) {
+            topBar
             editorCard
         }
-        .padding(.horizontal, 24)
-        .padding(.top, 22)
-        .padding(.bottom, 20)
+        .padding(.horizontal, 22)
+        .padding(.top, 14)
+        .padding(.bottom, 18)
         .background(StudioPalette.background)
         .navigationTitle("创作台")
         .task { editor.focus(); if appState == nil { try? await draft.saveNow() } }
-        .sheet(isPresented: Binding(get: { appState?.generationPlan != nil }, set: { if !$0 { appState?.generationPlan = nil } })) {
-            if let appState, let plan = appState.generationPlan {
-                GenerationSheet(plan: plan, directoryName: outputFolderName, service: appState.generation,
-                    onConfirm: { hash, id in appState.submit(plan: plan, hash: hash, requestID: id) },
-                    onCancel: { appState.generationPlan = nil })
+        .sheet(isPresented: Binding(
+            get: { (appState?.generationPlan != nil) || (appState?.isShowingGenerationOverlay == true) },
+            set: { if !$0 {
+                appState?.generationPlan = nil
+                appState?.isShowingGenerationOverlay = false
+            } }
+        )) {
+            if let appState {
+                GenerationSheet(
+                    plan: appState.generationPlan,
+                    directoryName: outputFolderName,
+                    appState: appState,
+                    onDismiss: {
+                        appState.generationPlan = nil
+                        appState.isShowingGenerationOverlay = false
+                    },
+                    onNavigateToLibrary: {
+                        appState.selectedPage = .library
+                    }
+                )
             }
         }
         .sheet(isPresented: $showsVoiceSheet) {
@@ -53,30 +67,39 @@ struct CreationScreen: View {
         }
     }
 
-    private var header: some View {
-        HStack(spacing: 12) {
-            TextField("作品名称", text: field(\.name))
-                .textFieldStyle(.plain)
-                .font(StudioTypography.serif(28))
-                .focused($titleFocused)
-                .onSubmit { editor.focus() }
-                .accessibilityIdentifier("draft-name")
-                .frame(maxWidth: .infinity, alignment: .leading)
-            Label(saveTitle, systemImage: saveSymbol)
-                .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(draft.state == .conflict ? Color.orange : .secondary)
-                .fixedSize()
-            if let appState {
-                Menu {
-                    Button("空白草稿") { Task { await appState.newBlankDraft() } }
-                } label: { Image(systemName: "ellipsis") }
-                    .menuStyle(.borderlessButton)
+    private var topBar: some View {
+        HStack(alignment: .center, spacing: 16) {
+            HStack(spacing: 10) {
+                TextField("作品名称", text: field(\.name))
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 16, weight: .bold))
+                    .focused($titleFocused)
+                    .onSubmit { editor.focus() }
+                    .accessibilityIdentifier("draft-name")
+                    .frame(minWidth: 140, maxWidth: 260, alignment: .leading)
+                Label(saveTitle, systemImage: saveSymbol)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(draft.state == .conflict ? Color.orange : .secondary)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 3)
+                    .background(Color.primary.opacity(0.04), in: Capsule())
                     .fixedSize()
-                    .help("草稿操作")
-                    .accessibilityLabel("草稿操作")
+            }
+            Spacer(minLength: 12)
+            HStack(spacing: 8) {
+                modes
+                if let appState {
+                    Menu {
+                        Button("空白草稿") { Task { await appState.newBlankDraft() } }
+                    } label: { Image(systemName: "ellipsis") }
+                        .menuStyle(.borderlessButton)
+                        .fixedSize()
+                        .help("草稿操作")
+                        .accessibilityLabel("草稿操作")
+                }
             }
         }
-        .frame(height: 42)
+        .frame(height: 34)
     }
 
     private var saveTitle: String {
@@ -98,22 +121,28 @@ struct CreationScreen: View {
     }
 
     private var modes: some View {
-        HStack(spacing: 7) {
+        HStack(spacing: 4) {
             ForEach(CreationMode.allCases) { mode in
+                let isSelected = draft.fields.mode == mode
                 Button { draft.change { $0.mode = mode } } label: {
-                    Label(mode.title, systemImage: mode.symbol)
-                        .font(.system(size: 12, weight: .semibold))
-                        .frame(maxWidth: .infinity)
-                        .frame(height: 38)
-                        .foregroundStyle(draft.fields.mode == mode ? .white : .primary)
-                        .background(draft.fields.mode == mode ? StudioPalette.green : StudioPalette.surface,
-                                    in: RoundedRectangle(cornerRadius: 9))
-                        .overlay(RoundedRectangle(cornerRadius: 9).stroke(StudioPalette.stroke))
+                    HStack(spacing: 5) {
+                        Image(systemName: mode.symbol)
+                            .font(.system(size: 11, weight: isSelected ? .semibold : .regular))
+                        Text(mode.title)
+                            .font(.system(size: 12, weight: isSelected ? .semibold : .medium))
+                    }
+                    .padding(.horizontal, 11)
+                    .frame(height: 28)
+                    .foregroundStyle(isSelected ? Color.white : Color.primary.opacity(0.85))
+                    .background(isSelected ? StudioPalette.green : Color.clear, in: Capsule())
                 }
                 .buttonStyle(.plain)
-                .accessibilityAddTraits(draft.fields.mode == mode ? [.isSelected] : [])
+                .accessibilityAddTraits(isSelected ? [.isSelected] : [])
             }
         }
+        .padding(3)
+        .background(StudioPalette.surface, in: Capsule())
+        .overlay(Capsule().stroke(StudioPalette.stroke))
     }
 
     private var editorCard: some View {
@@ -121,7 +150,7 @@ struct CreationScreen: View {
             HStack(spacing: 0) {
                 scriptPane
                 Divider()
-                ParameterInspector(params: field(\.params), onAddVoice: { showsVoiceSheet = true }).frame(width: 258)
+                ParameterInspector(params: field(\.params), onAddVoice: { showsVoiceSheet = true }).frame(width: 268)
             }
             .frame(maxHeight: .infinity)
             if draft.state == .conflict {
@@ -139,53 +168,103 @@ struct CreationScreen: View {
             Divider()
             footer
         }
-        .background(StudioPalette.surface, in: RoundedRectangle(cornerRadius: 14))
-        .overlay(RoundedRectangle(cornerRadius: 14).stroke(StudioPalette.stroke))
-        .clipShape(RoundedRectangle(cornerRadius: 14))
+        .background(StudioPalette.surface, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(StudioPalette.stroke))
+        .clipShape(RoundedRectangle(cornerRadius: 12))
         .frame(maxHeight: .infinity)
     }
 
     private var scriptPane: some View {
-        VStack(alignment: .leading, spacing: 11) {
-            HStack {
-                Text("创作脚本").font(StudioTypography.serif(20))
-                Spacer()
-                Text("⌘Z 撤销").font(.caption).foregroundStyle(.secondary)
-            }
-            HStack(spacing: 5) {
-                insertButton("角色", tag: "【角色：讲述者】")
-                insertButton("对白", tag: "【对白：讲述者】")
-                insertButton("时间戳", tag: "【00:00】")
-                insertButton("音效", tag: "【音效】")
-                insertButton("音乐", tag: "【音乐】")
-                Button { showsVoiceSheet = true } label: { Label("音色", systemImage: "person.wave.2") }
-                    .font(.system(size: 11)).disabled(outputFolders.referenceAudio == nil)
-                ForEach(draft.fields.referenceBindings, id: \.referenceID) { binding in
-                    insertButton("@voice\(binding.slot)", tag: "@voice\(binding.slot)")
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                HStack(spacing: 6) {
+                    tagChip("角色", tag: "【角色：讲述者】", color: Color.blue)
+                    tagChip("对白", tag: "【对白：讲述者】", color: Color.teal)
+                    tagChip("时间戳", tag: "【00:00】", color: Color.secondary)
+                    tagChip("音效", tag: "【音效】", color: Color.purple)
+                    tagChip("音乐", tag: "【音乐】", color: Color.indigo)
+                    Button { showsVoiceSheet = true } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: "person.wave.2")
+                            Text("音色")
+                        }
+                        .font(.system(size: 11, weight: .medium))
+                        .padding(.horizontal, 8)
+                        .frame(height: 24)
+                        .background(StudioPalette.green.opacity(0.12), in: RoundedRectangle(cornerRadius: 6))
+                        .foregroundStyle(StudioPalette.green)
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(outputFolders.referenceAudio == nil)
+                    ForEach(draft.fields.referenceBindings, id: \.referenceID) { binding in
+                        tagChip("@voice\(binding.slot)", tag: "@voice\(binding.slot)", color: StudioPalette.green)
+                    }
                 }
-                Spacer(minLength: 0)
+                Spacer(minLength: 8)
+                HStack(spacing: 3) {
+                    Button {
+                        preferences.scriptSize = max(14, preferences.scriptSize - 1)
+                    } label: {
+                        Image(systemName: "textformat.size.smaller")
+                            .font(.system(size: 11))
+                            .frame(width: 22, height: 22)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("减小脚本字号")
+
+                    Text("\(Int(preferences.scriptSize)) pt")
+                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .frame(minWidth: 36)
+
+                    Button {
+                        preferences.scriptSize = min(28, preferences.scriptSize + 1)
+                    } label: {
+                        Image(systemName: "textformat.size.larger")
+                            .font(.system(size: 11))
+                            .frame(width: 22, height: 22)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .help("增大脚本字号")
+                }
+                .padding(.horizontal, 4)
+                .padding(.vertical, 2)
+                .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 6))
             }
+            .padding(.horizontal, 14)
+            .padding(.top, 10)
+            .padding(.bottom, 4)
+
             PromptEditor(text: field(\.prompt), font: preferences.scriptFont.font(size: preferences.scriptSize), handle: editor, sharedUndoManager: sharedUndoManager)
-                .background(StudioPalette.background, in: RoundedRectangle(cornerRadius: 9))
-                .overlay(RoundedRectangle(cornerRadius: 9).stroke(StudioPalette.stroke))
-                .clipShape(RoundedRectangle(cornerRadius: 9))
                 .frame(minHeight: 100, maxHeight: .infinity)
+
             HStack {
-                Text("编辑后切换模式，保留你的脚本")
+                Text("输入【可呼出标记 · 切换模式保留脚本")
                 Spacer()
                 Text("\(draft.fields.prompt.unicodeScalars.count) 字").monospacedDigit()
             }
             .font(.system(size: 11)).foregroundStyle(.secondary)
+            .padding(.horizontal, 14)
+            .padding(.bottom, 10)
         }
-        .padding(18)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private func insertButton(_ title: String, tag: String) -> some View {
-        Button(title) { editor.insert(tag) }
-            .font(.system(size: 11))
-            .buttonStyle(.bordered)
-            .help("在光标或选区插入\(title)标签，可撤销")
+    private func tagChip(_ title: String, tag: String, color: Color) -> some View {
+        Button {
+            editor.insert(tag)
+        } label: {
+            Text(title)
+                .font(.system(size: 11, weight: .medium))
+                .padding(.horizontal, 8)
+                .frame(height: 24)
+                .background(color.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
+                .foregroundStyle(color)
+        }
+        .buttonStyle(.plain)
+        .help("在光标或选区插入\(title)标签")
     }
 
     private var footer: some View {
