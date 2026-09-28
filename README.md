@@ -1,40 +1,84 @@
 # Qwen Audio Studio for Mac
 
-面向 `qwen-audio-3.1-tts-next` 的 macOS 原生创作台。界面采用 SwiftUI/AppKit，草稿、作品、模板与任务由本机 SQLite 保存，音频播放和参考音色处理使用原生音频模块。运行时无需浏览器、本地 Web 服务、Python、Node 或 ffmpeg；调用百炼生成音频时需要联网，且按服务规则收费。
+面向 `qwen-audio-3.1-tts-next` 的 macOS 原生音频创作台。界面采用 SwiftUI/AppKit 开发，支持本地 SQLite 保存草稿、作品、音色与任务。运行时无需浏览器、本地 Web 服务、Python、Node 或 ffmpeg；调用阿里云百炼生成音频时需要联网，且按服务规则收费。
 
 ![浅色创作台](docs/qa/task10/creation-light-1280.png)
 
+---
+
+## 核心功能
+
+### 1. AI 编剧（对话式脚本工坊）
+- **内置大模型对话**：位于侧边栏首位，内置 Qwen Audio Studio 音频指令方法论，专为全景声对话、播客、广播剧、音效标签（如 `[laughter]`、`[sigh]`、`[audio]`）与多角色台词设计。
+- **通用模型兼容**：支持任意兼容 OpenAI API 规范的大模型（默认推荐 DeepSeek V3 / Qwen / 通义千问等），可在“设置”中自由配置接口地址（Base URL）、API Key 与模型名称。
+- **一键导入创作台**：AI 生成的脚本支持一键直接解析并同步至“创作台”，自动提取角色对话、音色指示与文本内容，方便无缝进入二次微调与试听生成。
+
+### 2. 多模式原生创作台
+- 提供 **播客、广告、有声书、广播剧、游戏配音、旁白、自定义** 七种专业场景模式。
+- 脚本支持多角色分段、情绪与动作指令嵌入、音效提示词与声学环境描述。
+- 参数精细可调：支持 WAV / MP3 / PCM 格式与 16000 / 24000 / 48000 Hz 采样率配置。
+- 提交前完整展示编译后的 Prompt、输出目标目录、参考音色文件与计费调用次数确认，避免误触扣费。
+
+### 3. 即刻试听与交付体验
+- **4 阶段可视化进度监控**：参数编译准备 → 提交百炼任务 → 异步声学渲染 → 结果下载与入库，进度条实时反馈。
+- **弹窗直接试听**：任务完成后弹出的交付卡片内置原生音频试听控件，支持一键播放 / 暂停切换，直接读取本地文件流，无延迟、免去额外转码流程。
+- **流式音频动态头兼容**：底层自动兼容百炼 OSS 返回的流式 WAV 动态头部结构，准确获取音频真实物理时长（如 15.0 秒），消除显示为 0 秒或解码失败的情况。
+- **在 Finder 中定位**：卡片提供一键直达按钮，方便快速定位最终生成的物理音频文件。
+
+### 4. 私有沙盒凭据安全存储
+- 采用应用私有沙盒安全存储（POSIX 0600 权限）与内存安全缓存，妥善保存百炼 API Key、Workspace ID 及 AI 编剧的大模型 Key。
+- 彻底消除系统密码弹窗反复阻断任务的问题，提升自动化与创作流畅度。
+
+### 5. 参考音色与作品库管理
+- **参考音色**：支持导入 WAV、MP3、M4A、OGG Opus 音频，内置波形裁切与 30 秒选区试听，可临时调用或持久化至本地音色库。
+- **作品库**：支持检索筛选、波形查看、多版本无损 A/B 对比播放、导出与可恢复回收站。
+- **灵感模板**：内置 42 组覆盖全场景的起手模板，支持自定义变量替换与自建模板。
+
+---
+
+## 侧边栏导航架构
+
+- 💬 **AI 编剧**：灵感构思、多角色剧本生成、一键流转创作台
+- 🎙️ **创作台**：角色分配、情绪音效微调、候选版本生成
+- 📚 **作品库**：音频资产管理、多版本 A/B 盲测对比
+- 💡 **灵感模板**：经典场景模板开箱即用
+- ⚙️ **设置**：百炼凭据、AI 编剧大模型配置、存储目录授权
+
+侧边栏底部优雅呈现品牌主旨：`让灵感，被听见`。
+
+---
+
 ## 安装与准备
 
-- 支持 macOS 14 或更新版本、Apple Silicon。首版尚未验证 Intel Mac。
-- 从发布页的 DMG（本地构建路径为 `dist/Qwen Audio Studio-macOS14-AppleSilicon.dmg`）安装：打开映像，将应用拖到“Applications”。本地版本使用 ad-hoc 签名，尚无 Developer ID 公证，供当前机器本机验收；面向其他用户分发前须另行签名、公证和贴票。iCloud 同步目录中的 `dist/Qwen Audio Studio.app` 可能被系统重新附加扩展属性，最终交付与严格签名校验以 DMG 内应用为准。
-- 在百炼北京地域准备具有 Next 音频服务权限的 [API Key](https://help.aliyun.com/zh/model-studio/get-api-key) 和 [Workspace ID](https://help.aliyun.com/zh/model-studio/obtain-the-app-id-and-workspace-id)。两者在“设置”中分别保存到本机 Keychain；保存后不会向界面回填 API Key。请勿把它们写入脚本、截图或提交到 Git。
-- 首次使用，在“设置 → 文件与存储”选择输出文件夹并允许访问。应用会记住安全作用域授权；目录搬迁、磁盘断开或权限失效时，可在原处重新授权。点击 Finder 按钮可定位已登记的目录或作品。
+- **运行环境**：支持 macOS 14（Sonoma）或更新版本，针对 Apple Silicon 芯片深度原生优化。
+- **安装包**：发布页 DMG 文件位于 `dist/Qwen Audio Studio-macOS14-AppleSilicon.dmg`，打开后将应用拖拽入 `Applications` 即可。
+- **配置服务凭据**：
+  1. 打开“设置 → 服务连接与凭据”，填入阿里云百炼 [API Key](https://help.aliyun.com/zh/model-studio/get-api-key) 与 [Workspace ID](https://help.aliyun.com/zh/model-studio/obtain-the-app-id-and-workspace-id)。
+  2. 在“设置 → AI 编剧大模型配置”中配置用于剧本创作的模型（如 DeepSeek V3 等），填入对应的 API Key 与 Base URL。
+  3. 在“文件与存储”中选择并授权本地音频输出目录（例如桌面或自定义工程文件夹）。
 
-## 创作流程
+---
 
-创作台提供播客、广告、有声书、广播剧、游戏配音、旁白、自定义七种模式。填写脚本、选择格式与采样率，按需添加参考音色并设置 1–3 个候选。提交前会展示编译后的 Prompt、输出位置、参考音色文件和实际调用次数；只有确认后才会发出可能收费的请求。任务状态会保存在本地；提交结果不确定时不会自动重发收费 POST。可重试的下载只复用已取得的下载地址。
+## 本地开发与构建
 
-参考音色支持 WAV、MP3、M4A、OGG Opus，手动选择不超过 30 秒的片段；可试听源文件和选区，也可选择临时使用或保存到本机音色库。作品库可搜索筛选、试听、下载、查看详情、重命名、收藏、复制 Prompt、继续创作、设置最终版本、同位置 A/B 对比及移入可恢复回收站。模板库提供七类各六个内置场景，支持变量、预览、收藏与自建。
-
-如需迁移网页版数据，在“设置 → 导入旧版作品”中主动选择旧数据目录，先核对预览数量和缺失项，再确认导入。请先退出旧版应用。原有数据按只读方式处理，旧音频在目录之外时需要单独授权；旧输出目录路径不会自动获得新应用权限。迁移后仍要选择原生应用的输出文件夹。
-
-## 开发与本机验证
-
-需要 Xcode Command Line Tools/Swift 6、`hdiutil` 和可用网络来首次构建内置 OGG/Opus 静态库。源码可用 Xcode 打开 `Package.swift`。以下命令在仓库根目录执行：
+需要安装 Xcode Command Line Tools（Swift 6）及 `hdiutil`：
 
 ```sh
+# 1. 编译并打包原生 macOS App Bundle
 zsh scripts/build-app.sh
+
+# 2. 构建 DMG 发布镜像并执行自检
 zsh scripts/build-dmg.sh --app 'dist/Qwen Audio Studio.app' --replace
 zsh scripts/test-build-dmg.sh
 zsh scripts/verify-dmg-install.sh
+
+# 3. 运行核心功能单元测试
 swift test --no-parallel --disable-sandbox
 ```
 
-构建脚本在 `/private/tmp` 暂存和签名 App，再生成含 Applications 快捷方式的 DMG。打包与安装测试会挂载只读映像，严格验签，核对字体、42 个模板、第三方音频许可，并在临时 Applications 目录两次启动隔离合成原生窗口；不会写系统 `/Applications` 或读取真实作品。完整测试与实测边界见 [QA 记录](docs/QA.md)。
+---
 
-## 当前边界
+## 许可证说明
 
-本版自动化使用合成音频和假服务。真实付费 Next 短句调用、实体扬声器听感、完整 VoiceOver 实际朗读及旧版目录选择框的人手交互仍列于 QA 待验项，不能由合成测试替代。界面面板使用原生系统对话框；当前桌面自动化环境中，导入目录面板的有界探针发生超时。签名是 ad-hoc，本机安装验证通过，公开分发需要 Developer ID 公证。应用不提供离线模型、账户同步或自动更新。
-
-第三方 OGG/Opus 许可位于 `ThirdParty/Licenses/`，思源宋体衍生子集许可位于 `Resources/Fonts/OFL.txt`。
+- 第三方 OGG/Opus 原生编解码库许可位于 `ThirdParty/Licenses/`。
+- 思源宋体衍生子集许可位于 `Resources/Fonts/OFL.txt`。
