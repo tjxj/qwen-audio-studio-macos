@@ -1,0 +1,116 @@
+"use strict";
+const fs = require("node:fs");
+const path = require("node:path");
+const os = require("node:os");
+const { createHash } = require("node:crypto");
+const { spawnSync } = require("node:child_process");
+async function main() {
+  const { packager } = await import("@electron/packager");
+  const asar = await import("@electron/asar");
+  const root = path.resolve(__dirname, "..");
+  const pkg = require("../package.json");
+  const out = path.join(root, "out");
+  const result = await packager({
+    dir: root,
+    out,
+    name: "Qwen Audio Studio",
+    executableName: "Qwen Audio Studio",
+    platform: "win32",
+    arch: "x64",
+    electronVersion: pkg.devDependencies.electron,
+    appVersion: pkg.version,
+    overwrite: true,
+    asar: true,
+    prune: true,
+    icon: path.join(root, "resources/icon.ico"),
+    download: {
+      cacheRoot:
+        process.env.ELECTRON_CACHE ||
+        path.join(os.tmpdir(), "qwen-electron-cache"),
+    },
+    ignore: [
+      /^\/out(?:\/|$)/,
+      /^\/tests(?:\/|$)/,
+      /^\/test-results(?:\/|$)/,
+      /^\/playwright-report(?:\/|$)/,
+      /^\/scripts(?:\/|$)/,
+      /^\/playwright.*\.cjs$/,
+      /package-lock\.json$/,
+    ],
+    win32metadata: {
+      CompanyName: "Qwen Audio Studio",
+      FileDescription: "Qwen Audio Studio for Windows",
+      ProductName: "Qwen Audio Studio",
+    },
+  });
+  const directory = result[0],
+    executable = path.join(directory, "Qwen Audio Studio.exe");
+  const bytes = fs.readFileSync(executable);
+  if (bytes.toString("ascii", 0, 2) !== "MZ")
+    throw new Error("Missing Windows PE executable");
+  const pe = bytes.readUInt32LE(0x3c);
+  if (bytes.readUInt16LE(pe + 4) !== 0x8664)
+    throw new Error("Executable is not x64");
+  const archivePath = path.join(directory, "resources/app.asar");
+  const files = require("./package-validation.cjs").verifyPackageFiles(
+    asar.listPackage(archivePath),
+  );
+  const templates = JSON.parse(
+    asar.extractFile(archivePath, "resources/templates.json"),
+  );
+  if (templates.length !== 42) throw new Error("Missing templates");
+  const archive = path.join(
+    out,
+    `Qwen-Audio-Studio-Windows-x64-${pkg.version}.zip`,
+  );
+  if (fs.existsSync(archive)) fs.unlinkSync(archive);
+  const command =
+    process.platform === "win32"
+      ? spawnSync(
+          "powershell.exe",
+          [
+            "-NoProfile",
+            "-Command",
+            "Compress-Archive -LiteralPath $env:QWEN_PACKAGE_INPUT -DestinationPath $env:QWEN_PACKAGE_OUTPUT -CompressionLevel Optimal",
+          ],
+          {
+            stdio: "inherit",
+            env: {
+              ...process.env,
+              QWEN_PACKAGE_INPUT: directory,
+              QWEN_PACKAGE_OUTPUT: archive,
+            },
+          },
+        )
+      : spawnSync("zip", ["-q", "-r", archive, path.basename(directory)], {
+          cwd: out,
+          stdio: "inherit",
+        });
+  if (command.status !== 0) throw new Error("ZIP creation failed");
+  const sha256 = createHash("sha256")
+    .update(fs.readFileSync(archive))
+    .digest("hex");
+  fs.writeFileSync(
+    `${archive}.sha256`,
+    `${sha256}  ${path.basename(archive)}\n`,
+  );
+  console.log(
+    JSON.stringify(
+      {
+        archive,
+        sha256,
+        bytes: fs.statSync(archive).size,
+        platform: "win32",
+        arch: "x64",
+        electron: pkg.devDependencies.electron,
+        verifiedFiles: files.length,
+      },
+      null,
+      2,
+    ),
+  );
+}
+main().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});

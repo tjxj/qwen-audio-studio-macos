@@ -1,0 +1,25 @@
+{
+  "name": "qwen-audio-studio-windows",
+  "productName": "Qwen Audio Studio",
+  "version": "0.1.0",
+  "description": "Windows desktop audio creation studio for Qwen Audio Next",
+  "private": true,
+  "main": "src/main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test tests/*.test.cjs",
+    "test:ui": "playwright test",
+    "package:win": "node scripts/package.cjs",
+    "check": "node scripts/check.cjs",
+    "postinstall": "install-electron",
+    "test:desktop": "playwright test --config=playwright.desktop.config.cjs"
+  },
+  "devDependencies": {
+    "@electron/packager": "20.3.0",
+    "@playwright/test": "1.63.0",
+    "electron": "44.5.0"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

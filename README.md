@@ -7,6 +7,10 @@
 
 ---
 
+## Windows 版
+
+Windows 10/11 x64 桌面版现位于 [`windows/`](windows/README.md)，与本机 macOS 工程和数据独立。提供便携 ZIP、Windows 原生 CI 与完整测试说明；请以对应提交的成功构建为准。
+
 ## 界面预览
 
 ### 1. AI 编剧（对话式全景声剧本工坊）

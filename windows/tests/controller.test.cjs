@@ -1,0 +1,162 @@
+const { test } = require("node:test");
+const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+const { StudioController } = require("../src/controller.cjs");
+function setup(t) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "qwen-controller-"));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  let data = {
+    version: 1,
+    draft: {
+      name: "未命名",
+      mode: "podcast",
+      prompt: "",
+      params: {},
+      bindings: [],
+    },
+    settings: {
+      outputDirectory: "",
+      chatBaseURL: "https://old.invalid/v1",
+      chatModel: "model",
+    },
+    tasks: [],
+    references: [],
+    templateFavorites: [],
+    customTemplates: [],
+    chatMessages: [],
+  };
+  let secrets = {
+    apiKey: "test-key",
+    workspaceID: "test-space",
+    chatAPIKey: "chat-secret",
+  };
+  const store = {
+    snapshot: () => structuredClone(data),
+    update: (fn) => {
+      const next = structuredClone(data);
+      fn(next);
+      data = next;
+      return data;
+    },
+  };
+  const vault = {
+    load: () => ({ ...secrets }),
+    save: (x) => {
+      secrets = { ...x };
+    },
+    status: () => ({
+      hasAPIKey: !!secrets.apiKey,
+      hasChatKey: !!secrets.chatAPIKey,
+      encryptionAvailable: true,
+    }),
+  };
+  const dialog = {
+    showOpenDialog: async () => ({ canceled: true }),
+    showSaveDialog: async () => ({ canceled: true }),
+  };
+  const service = { isBusy: false };
+  return {
+    controller: new StudioController({
+      store,
+      vault,
+      service,
+      directory: root,
+      dialog,
+      shell: {},
+      templates: [],
+      notify: () => {},
+    }),
+    store,
+    vault,
+    root,
+    dialog,
+  };
+}
+test("saveDraft snapshots edits but rejects prototype pollution, unknown modes and huge drafts", async (t) => {
+  const { controller } = setup(t);
+  const draft = {
+    name: "新的项目",
+    mode: "drama",
+    prompt: "你好",
+    params: { format: "wav" },
+    bindings: [],
+  };
+  await controller.saveDraft(draft);
+  assert.equal(controller.bootstrap().draft.name, "新的项目");
+  await assert.rejects(controller.saveDraft({ ...draft, mode: "evil" }));
+  await assert.rejects(
+    controller.saveDraft({ ...draft, prompt: "x".repeat(20001) }),
+  );
+  assert.equal(controller.bootstrap().draft.prompt, "你好");
+});
+test("canceling output folder selection does not change saved settings", async (t) => {
+  const { controller, store } = setup(t);
+  store.update((x) => (x.settings.outputDirectory = "keep-me"));
+  assert.equal(await controller.chooseOutputDirectory(), null);
+  assert.equal(store.snapshot().settings.outputDirectory, "keep-me");
+});
+test("changing chat provider clears existing chat key instead of transmitting it to new provider", async (t) => {
+  const { controller, vault } = setup(t);
+  await controller.saveSettings({
+    chatBaseURL: "https://new.invalid/v1",
+    chatModel: "model",
+  });
+  assert.equal(vault.load().chatAPIKey, "");
+  assert.equal(
+    controller.bootstrap().settings.chatBaseURL,
+    "https://new.invalid/v1",
+  );
+});
+test("invalid settings cannot overwrite either settings or credentials", async (t) => {
+  const { controller, store, vault } = setup(t);
+  await assert.rejects(
+    controller.saveSettings({
+      apiKey: "new",
+      chatBaseURL: "http://insecure.invalid",
+    }),
+  );
+  assert.equal(vault.load().apiKey, "test-key");
+  assert.equal(store.snapshot().settings.chatBaseURL, "https://old.invalid/v1");
+});
+test("readAudio cannot access arbitrary path or unknown IDs", async (t) => {
+  const { controller } = setup(t);
+  await assert.rejects(
+    controller.readAudio({ kind: "task", id: "../../credentials.bin" }),
+  );
+  await assert.rejects(controller.readAudio({ kind: "path", id: "anything" }));
+});
+test("task recycle and restore are metadata-only and preserve owned files", async (t) => {
+  const { controller, store, root } = setup(t);
+  const file = path.join(root, "audio.wav");
+  fs.writeFileSync(file, "unchanged");
+  store.update((x) =>
+    x.tasks.push({
+      id: "task1",
+      name: "hello",
+      status: "success",
+      outputPath: file,
+    }),
+  );
+  await controller.updateTask({ id: "task1", trashed: true });
+  assert.equal(store.snapshot().tasks[0].trashed, true);
+  await controller.updateTask({
+    id: "task1",
+    trashed: false,
+    name: "renamed",
+    favorite: true,
+  });
+  assert.equal(fs.readFileSync(file, "utf8"), "unchanged");
+  assert.equal(store.snapshot().tasks[0].name, "renamed");
+  await assert.rejects(
+    controller.updateTask({ id: "task1", outputPath: "/anything" }),
+  );
+});
+test("public app version is the release version rather than database schema version", (t) => {
+  const { controller } = setup(t);
+  assert.equal(
+    controller.bootstrap().version,
+    require("../package.json").version,
+  );
+});

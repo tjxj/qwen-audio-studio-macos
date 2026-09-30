@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; connect-src 'none'; media-src 'self' blob:; img-src 'self' data:; style-src 'self'; script-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'"
+    />
+    <title>Qwen Audio Studio</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script src="audio.js" defer></script>
+    <script src="app.js" defer></script>
+  </head>
+  <body>
+    <div id="app" class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-symbol" aria-hidden="true">
+            <i></i><i></i><i></i><i></i><i></i>
+          </div>
+          <div><strong>Qwen Audio</strong><span>STUDIO / WINDOWS</span></div>
+        </div>
+        <div class="nav-label">你的声音工作室</div>
+        <nav aria-label="主导航" id="navigation"></nav>
+        <div class="sidebar-foot">
+          <div class="local-dot"></div>
+          <span>创作在本地，灵感无边界</span
+          ><small id="version">WINDOWS EDITION</small>
+        </div>
+      </aside>
+      <div class="workspace">
+        <header class="page-header">
+          <div>
+            <p class="eyebrow" id="page-eyebrow">
+              CREATE SOMETHING WORTH HEARING
+            </p>
+            <h1 id="page-title">创作台</h1>
+          </div>
+          <div id="page-actions"></div>
+        </header>
+        <main id="content" tabindex="-1">
+          <div class="empty-state">正在打开你的工作室…</div>
+        </main>
+        <footer class="player-bar">
+          <div class="player-label">
+            <span class="player-icon" aria-hidden="true">♫</span>
+            <div>
+              <strong id="player-title">听见你的下一段灵感</strong
+              ><span id="player-caption">选择作品或参考音色，开始试听</span>
+            </div>
+          </div>
+          <audio
+            id="audio-player"
+            controls
+            preload="metadata"
+            aria-label="音频播放器"
+          ></audio
+          ><button
+            id="player-stop"
+            class="quiet"
+            type="button"
+            aria-label="停止播放"
+          >
+            停止
+          </button>
+        </footer>
+      </div>
+    </div>
+    <div id="toast" role="status" aria-live="polite" hidden></div>
+    <dialog id="modal" aria-labelledby="modal-title"></dialog>
+  </body>
+</html>

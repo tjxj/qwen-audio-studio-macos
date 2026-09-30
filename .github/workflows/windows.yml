@@ -1,0 +1,56 @@
+name: Windows desktop
+on:
+  pull_request:
+    paths:
+      [
+        "windows/**",
+        ".github/workflows/windows.yml",
+        "Sources/StudioCore/Resources/templates.json",
+      ]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  test-and-package:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    defaults:
+      run:
+        working-directory: windows
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: windows/package-lock.json
+      - run: npm ci
+      - run: npm run check
+      - run: npm test
+      - run: npx playwright install chromium
+      - run: npm run test:ui
+      - run: npm run test:desktop
+      - run: npm run package:win
+      - run: node scripts/smoke-package.cjs
+      - uses: actions/upload-artifact@v6
+        with:
+          name: Qwen-Audio-Studio-Windows-x64
+          path: |
+            windows/out/*.zip
+            windows/out/*.sha256
+          if-no-files-found: error
+          retention-days: 14
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: windows-test-evidence
+          path: |
+            windows/test-results/
+            windows/playwright-report/
+          if-no-files-found: ignore
+          retention-days: 14
