@@ -1,8 +1,74 @@
-'use strict';
-const {app,safeStorage}=require('electron');const fs=require('node:fs');const path=require('node:path');
-const {Store}=require('../src/core/store.cjs');const {CredentialVault}=require('../src/core/credentials.cjs');const {wrapPCM}=require('../src/core/audio.cjs');const {startDesktop}=require('../src/main.cjs');
-const directory=process.env.QWEN_TEST_DIRECTORY;if(!directory)throw Error('Test directory required');fs.mkdirSync(directory,{recursive:true});app.setPath('userData',directory);
-(async()=>{await app.whenReady();const store=new Store(directory);store.load();const output=path.join(directory,'音频输出');fs.mkdirSync(output,{recursive:true});if(!store.snapshot().settings.outputDirectory)store.update(s=>{s.settings.outputDirectory=output;s.draft.name='自动化验收';s.draft.prompt='【旁白】这是一段合成测试。';});const vault=new CredentialVault(directory,safeStorage);if(!vault.status().hasAPIKey)vault.save({apiKey:'TEST_ONLY_FAKE_AUDIO_KEY',workspaceID:'test-workspace',chatAPIKey:'TEST_ONLY_FAKE_CHAT_KEY',chatEndpoint:require('../src/core/chat.cjs').chatEndpoint(store.snapshot().settings.chatBaseURL)});let calls=0;let lastParams;const provider={synthesize:async({body})=>{calls++;lastParams=body.input;fs.writeFileSync(path.join(directory,'provider-calls.json'),JSON.stringify({calls,body}));return {requestID:`fake-request-${calls}`,audioURL:'https://fake.invalid/audio',expiresAt:Date.now()/1000+3600};},download:async()=>wrapPCM(Buffer.alloc(lastParams.sample_rate*lastParams.channels*2),{sampleRate:lastParams.sample_rate,channels:lastParams.channels})};
-const dialog={showOpenDialog:async()=>({canceled:true,filePaths:[]}),showSaveDialog:async()=>({canceled:true})};
-globalThis.qaDecode=require('../src/decoder.cjs').decodeAudio;globalThis.qaDesktop=await startDesktop({directory,vault,provider,dialog,shell:{showItemInFolder:()=>{}},chatClient:async()=> '```qwen-script\n[标题]: 测试剧本\n[模式]: 旁白\n【对白】测试结束。\n```'});
-})().catch(error=>{fs.writeFileSync(path.join(directory,'launch-error.txt'),error.stack);app.exit(1);});
+"use strict";
+const { app, safeStorage } = require("electron");
+const fs = require("node:fs");
+const path = require("node:path");
+const { Store } = require("../src/core/store.cjs");
+const { CredentialVault } = require("../src/core/credentials.cjs");
+const { wrapPCM } = require("../src/core/audio.cjs");
+const { startDesktop } = require("../src/main.cjs");
+const directory = process.env.QWEN_TEST_DIRECTORY;
+if (!directory) throw Error("Test directory required");
+fs.mkdirSync(directory, { recursive: true });
+app.setPath("userData", directory);
+(async () => {
+  await app.whenReady();
+  const store = new Store(directory);
+  store.load();
+  const output = path.join(directory, "音频输出");
+  fs.mkdirSync(output, { recursive: true });
+  if (!store.snapshot().settings.outputDirectory)
+    store.update((s) => {
+      s.settings.outputDirectory = output;
+      s.draft.name = "自动化验收";
+      s.draft.prompt = "【旁白】这是一段合成测试。";
+    });
+  const vault = new CredentialVault(directory, safeStorage);
+  if (!vault.status().hasAPIKey)
+    vault.save({
+      apiKey: "TEST_ONLY_FAKE_AUDIO_KEY",
+      workspaceID: "test-workspace",
+      chatAPIKey: "TEST_ONLY_FAKE_CHAT_KEY",
+      chatEndpoint: require("../src/core/chat.cjs").chatEndpoint(
+        store.snapshot().settings.chatBaseURL,
+      ),
+    });
+  let calls = 0;
+  let lastParams;
+  const provider = {
+    synthesize: async ({ body }) => {
+      calls++;
+      lastParams = body.input;
+      fs.writeFileSync(
+        path.join(directory, "provider-calls.json"),
+        JSON.stringify({ calls, body }),
+      );
+      return {
+        requestID: `fake-request-${calls}`,
+        audioURL: "https://fake.invalid/audio",
+        expiresAt: Date.now() / 1000 + 3600,
+      };
+    },
+    download: async () =>
+      wrapPCM(Buffer.alloc(lastParams.sample_rate * lastParams.channels * 2), {
+        sampleRate: lastParams.sample_rate,
+        channels: lastParams.channels,
+      }),
+  };
+  const dialog = {
+    showOpenDialog: async () => ({ canceled: true, filePaths: [] }),
+    showSaveDialog: async () => ({ canceled: true }),
+  };
+  globalThis.qaDecode = require("../src/decoder.cjs").decodeAudio;
+  globalThis.qaDesktop = await startDesktop({
+    directory,
+    vault,
+    provider,
+    dialog,
+    shell: { showItemInFolder: () => {} },
+    chatClient: async () =>
+      "```qwen-script\n[标题]: 测试剧本\n[模式]: 旁白\n【对白】测试结束。\n```",
+  });
+})().catch((error) => {
+  fs.writeFileSync(path.join(directory, "launch-error.txt"), error.stack);
+  app.exit(1);
+});

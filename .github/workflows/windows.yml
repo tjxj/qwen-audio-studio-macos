@@ -1,10 +1,12 @@
 name: Windows desktop
 on:
   pull_request:
-    paths: ['windows/**', '.github/workflows/windows.yml', 'Sources/StudioCore/Resources/templates.json']
-  push:
-    branches: ['feature/windows-audio-studio']
-    paths: ['windows/**', '.github/workflows/windows.yml', 'Sources/StudioCore/Resources/templates.json']
+    paths:
+      [
+        "windows/**",
+        ".github/workflows/windows.yml",
+        "Sources/StudioCore/Resources/templates.json",
+      ]
   workflow_dispatch:
 permissions:
   contents: read
@@ -19,10 +21,12 @@ jobs:
       run:
         working-directory: windows
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v5
         with:
-          node-version: '24'
+          persist-credentials: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "24"
           cache: npm
           cache-dependency-path: windows/package-lock.json
       - run: npm ci
@@ -33,7 +37,7 @@ jobs:
       - run: npm run test:desktop
       - run: npm run package:win
       - run: node scripts/smoke-package.cjs
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         with:
           name: Qwen-Audio-Studio-Windows-x64
           path: |
@@ -41,7 +45,7 @@ jobs:
             windows/out/*.sha256
           if-no-files-found: error
           retention-days: 14
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v6
         if: always()
         with:
           name: windows-test-evidence

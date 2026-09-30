@@ -1,3 +1,36 @@
-'use strict';
-const { _electron }=require('@playwright/test');const path=require('node:path');const fs=require('node:fs');
-(async()=>{if(process.platform!=='win32')throw new Error('Packaged runtime smoke test requires Windows.');const executablePath=path.resolve(__dirname,'../out/Qwen Audio Studio-win32-x64/Qwen Audio Studio.exe');const app=await _electron.launch({executablePath,args:[]});try{const page=await app.firstWindow();await page.getByRole('heading',{name:'创作台',exact:true}).waitFor({timeout:30000});const state=await page.evaluate(()=>window.studio.bootstrap());if(state.templates.length!==42||state.credentials.hasAPIKey)throw new Error('Packaged resource or clean credential check failed.');fs.mkdirSync(path.resolve(__dirname,'../test-results'),{recursive:true});await page.screenshot({path:path.resolve(__dirname,'../test-results/windows-packaged.png')});console.log('Packaged Windows x64 application launched; 42 templates and secure bridge verified.');}finally{await app.close();}})().catch(error=>{console.error(error);process.exitCode=1;});
+"use strict";
+const { _electron } = require("@playwright/test");
+const path = require("node:path");
+const fs = require("node:fs");
+(async () => {
+  if (process.platform !== "win32")
+    throw new Error("Packaged runtime smoke test requires Windows.");
+  const executablePath = path.resolve(
+    __dirname,
+    "../out/Qwen Audio Studio-win32-x64/Qwen Audio Studio.exe",
+  );
+  const app = await _electron.launch({ executablePath, args: [] });
+  try {
+    const page = await app.firstWindow();
+    await page
+      .getByRole("heading", { name: "创作台", exact: true })
+      .waitFor({ timeout: 30000 });
+    const state = await page.evaluate(() => window.studio.bootstrap());
+    if (state.templates.length !== 42 || state.credentials.hasAPIKey)
+      throw new Error("Packaged resource or clean credential check failed.");
+    fs.mkdirSync(path.resolve(__dirname, "../test-results"), {
+      recursive: true,
+    });
+    await page.screenshot({
+      path: path.resolve(__dirname, "../test-results/windows-packaged.png"),
+    });
+    console.log(
+      "Packaged Windows x64 application launched; 42 templates and secure bridge verified.",
+    );
+  } finally {
+    await app.close();
+  }
+})().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});
