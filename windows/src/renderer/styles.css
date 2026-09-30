@@ -1201,3 +1201,37 @@ details .stack {
     scroll-behavior: auto !important;
   }
 }
+
+/* Windows 1120×720 includes window chrome. Keep generation visible in the
+   remaining client area; only the script and inspector scroll. */
+@media (min-width: 851px) {
+  #content[data-page="create"] {
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+  #content[data-page="create"] .editor-top,
+  #content[data-page="create"] .below-editor {
+    flex: none;
+  }
+  #content[data-page="create"] .editor-layout {
+    flex: 1;
+    min-height: 0;
+    grid-template-rows: minmax(0, 1fr) auto;
+  }
+  #content[data-page="create"] .script-pane {
+    min-height: 0;
+    overflow: hidden;
+  }
+  #content[data-page="create"] .script-editor {
+    min-height: 70px;
+    resize: none;
+  }
+  #content[data-page="create"] .inspector {
+    min-height: 0;
+    overflow: auto;
+  }
+  #content[data-page="create"] .editor-footer {
+    min-height: 78px;
+  }
+}

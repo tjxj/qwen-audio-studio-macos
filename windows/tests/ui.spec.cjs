@@ -464,7 +464,7 @@ test("reference binding retains stable slots after removal", async ({
 test("minimum window has no horizontal overflow and keyboard-visible focus", async ({
   page,
 }) => {
-  await page.setViewportSize({ width: 1120, height: 720 });
+  await page.setViewportSize({ width: 1104, height: 681 });
   await launch(page);
   expect(
     await page.evaluate(
@@ -708,4 +708,19 @@ test("active tasks cannot be renamed, favorited or trashed", async ({
   await expect(
     page.getByRole("button", { name: "移到回收站 进行中作品", exact: true }),
   ).toBeDisabled();
+});
+
+test("generation controls stay in viewport at the minimum Windows client area", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1104, height: 681 });
+  await launch(page);
+  await expect(
+    page.getByRole("button", { name: "生成音频", exact: true }),
+  ).toBeInViewport();
+  expect(
+    await page
+      .locator("#content")
+      .evaluate((node) => node.scrollHeight <= node.clientHeight + 1),
+  ).toBe(true);
 });

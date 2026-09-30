@@ -232,6 +232,7 @@
   }
   function navigate(next) {
     page = next;
+    $("content").dataset.page = page;
     renderNavigation();
     $("page-title").textContent = pages[page][0];
     $("page-eyebrow").textContent = pages[page][1];

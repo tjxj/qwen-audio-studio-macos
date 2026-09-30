@@ -228,7 +228,7 @@ test("real desktop fits minimum size and renders a usable library", async () => 
   ).toBe(true);
   await expect(
     page.getByRole("button", { name: "生成音频", exact: true }),
-  ).toBeVisible();
+  ).toBeInViewport();
   await page.screenshot({
     path: "test-results/windows-desktop-creation-1120.png",
   });
@@ -238,7 +238,7 @@ test("real desktop fits minimum size and renders a usable library", async () => 
     .click();
   await expect(
     page.getByRole("button", { name: "播放 自动化验收" }),
-  ).toBeVisible();
+  ).toBeInViewport();
   await page.screenshot({ path: "test-results/windows-desktop-library.png" });
 });
 

@@ -52,22 +52,9 @@ async function main() {
   if (bytes.readUInt16LE(pe + 4) !== 0x8664)
     throw new Error("Executable is not x64");
   const archivePath = path.join(directory, "resources/app.asar");
-  const files = asar.listPackage(archivePath);
-  for (const required of [
-    "/src/main.cjs",
-    "/src/preload.cjs",
-    "/src/renderer/index.html",
-    "/src/renderer/app.js",
-    "/resources/templates.json",
-  ])
-    if (!files.includes(required))
-      throw new Error(`Missing packaged file ${required}`);
-  if (
-    files.some(
-      (file) => file.startsWith("/tests/") || file.includes("credentials.bin"),
-    )
-  )
-    throw new Error("Private or test data in package");
+  const files = require("./package-validation.cjs").verifyPackageFiles(
+    asar.listPackage(archivePath),
+  );
   const templates = JSON.parse(
     asar.extractFile(archivePath, "resources/templates.json"),
   );

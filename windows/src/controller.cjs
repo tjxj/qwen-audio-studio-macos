@@ -87,6 +87,7 @@ class StudioController {
   }
   bootstrap() {
     const data = sanitizeState(this.store.snapshot());
+    data.version = require("../package.json").version;
     let secrets = {},
       credentialError;
     try {

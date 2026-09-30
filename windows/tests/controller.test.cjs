@@ -153,3 +153,10 @@ test("task recycle and restore are metadata-only and preserve owned files", asyn
     controller.updateTask({ id: "task1", outputPath: "/anything" }),
   );
 });
+test("public app version is the release version rather than database schema version", (t) => {
+  const { controller } = setup(t);
+  assert.equal(
+    controller.bootstrap().version,
+    require("../package.json").version,
+  );
+});
