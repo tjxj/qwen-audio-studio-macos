@@ -2,3 +2,9 @@
 dist/
 .DS_Store
 .swiftpm/
+windows/node_modules/
+windows/out/
+windows/test-results/
+windows/playwright-report/
+windows/tests/ui-preview.html
+windows/tests/ui-preview-bridge.js
